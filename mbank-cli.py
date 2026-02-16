@@ -152,6 +152,10 @@ def match(text, pattern, context=None):
     if not isinstance(pattern, re.Pattern):
         internal_error('match(): invalid argument', 1)
     
+    # Perl version accepts numeric scalars in regex matches; keep parity here.
+    if isinstance(text, (int, float)) and not isinstance(text, bool):
+        text = str(text)
+    
     if not isinstance(text, str):
         qtext = quote(text)
         scraping_error(f"{context}: {qtext} is not a string")
@@ -321,6 +325,12 @@ def unicode_to_bytes(s, encoding=None):
     
     codecs.register_error('custom_fallback', error_handler)
     return s.encode(encoding, errors='custom_fallback')
+
+def unicode_display(s, encoding=None):
+    """Convert text to terminal-safe string (without Python bytes repr)."""
+    if encoding is None:
+        encoding = locale.getpreferredencoding(False)
+    return unicode_to_bytes(s, encoding=encoding).decode(encoding, errors='replace')
 
 country_to_language = {
     'cz': 'cs',  # Czech Republic => Czech
@@ -777,9 +787,11 @@ def format_amount(s, fp=False, plus=False, currency=None):
 def format_money(number, currency, context=None):
     """Format money with proper alignment."""
     match(number, re.compile(r'-?[\d ]+(?:[.,]\d+)?'), context=f"{context}.number" if context else None)
+    number = str(number)
     number = number.replace(' ', '')
     number = number.replace(',', '.')
     match(currency, re.compile(r'[A-Z]{3}'), context=f"{context}.currency" if context else None)
+    currency = str(currency)
     
     try:
         s = f'{float(number):>10.2f} {currency}'
@@ -1199,6 +1211,14 @@ opt_export = None
 opt_multi = False
 opt_all = False
 
+header_xhr = {
+    'X-Requested-With': 'XMLHttpRequest',
+}
+
+header_accept_json = {
+    'Accept': 'application/json, text/javascript, */*; q=0.01',
+}
+
 def show_help():
     """Show help message."""
     print("""Usage: mbank-cli [OPTIONS] COMMAND [ARGS...]
@@ -1410,6 +1430,100 @@ def parse_args():
     command = args.command or 'list'
     return command, args.args
 
+def _extract_login_profiles(html):
+    """Extract available profiles from the post-login page."""
+    def extract_js_object_assignment(content, var_name):
+        marker_pos = content.find(var_name)
+        if marker_pos < 0:
+            return None
+        
+        eq_pos = content.find('=', marker_pos + len(var_name))
+        if eq_pos < 0:
+            return None
+        
+        start = content.find('{', eq_pos + 1)
+        if start < 0:
+            return None
+        
+        depth = 0
+        in_string = False
+        string_quote = ''
+        escaped = False
+        
+        for i in range(start, len(content)):
+            ch = content[i]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == '\\':
+                    escaped = True
+                elif ch == string_quote:
+                    in_string = False
+                continue
+            
+            if ch == '"' or ch == "'":
+                in_string = True
+                string_quote = ch
+                continue
+            
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    return content[start:i + 1]
+        
+        return None
+
+    profiles = {
+        'personal': [],
+        'business': [],
+    }
+    
+    scripts = html_find(html, tag='script', n=None)
+    for e_script in scripts:
+        content = e_script.text or ''
+        json_payload = extract_js_object_assignment(content, 'Ebre.Venezia.ProfileData')
+        if not json_payload:
+            continue
+        
+        data = decode_json(json_payload, context='login.profiles.json')
+        
+        for key, value in data.items():
+            if key == 'iProfiles':
+                key = 'personal'
+            elif key == 'fProfiles':
+                key = 'business'
+            else:
+                no_match(key, context='login.profiles.key')
+            
+            if not isinstance(value, dict):
+                scraping_error(f'login.profiles.{key}: not an object')
+            js_profiles = value.get('profiles', [])
+            if not isinstance(js_profiles, list):
+                scraping_error(f'login.profiles.{key}.profiles: not an array')
+            
+            n = 0
+            for js_profile in js_profiles:
+                if not isinstance(js_profile, dict):
+                    scraping_error(f'login.profiles.{key}.profile: not an object')
+                code = match(js_profile.get('profileCode', ''), re.compile(r'.+'), context='login.profiles.profile-code')
+                profiles[key].append(code)
+                n += 1
+                
+                if key == 'business':
+                    name = match(js_profile.get('firmName', ''), re.compile(r'.+'), context='login.profiles.company-name')
+                else:
+                    name = f'{key}/{code}'
+                profiles.setdefault(name, []).append(code)
+            
+            if n > 1:
+                profiles.pop(key, None)
+        
+        break
+    
+    return profiles
+
 def do_login(probe=False, register_device=None):
     """Perform login with authentication."""
     global ua
@@ -1550,17 +1664,21 @@ def do_login(probe=False, register_device=None):
     csrf_token = e_meta.attr('content')
     if not csrf_token or len(csrf_token) < 20:
         scraping_error(f'login.csrf-token: invalid token')
+    profiles = _extract_login_profiles(html)
     
     debug('logged in')
     
+    headers = {
+        'Referer': doc['url'],
+        'X-Tab-Id': tabid,
+        'X-Request-Verification-Token': csrf_token,
+    }
+    headers.update(header_xhr)
+    
     return {
-        'headers': {
-            'Referer': doc['url'],
-            'X-Tab-Id': tabid,
-            'X-Request-Verification-Token': csrf_token,
-            'X-Requested-With': 'XMLHttpRequest',
-        },
+        'headers': headers,
         'csrf_token': csrf_token,
+        'profiles': profiles,
         'url': doc['url'],
     }
 
@@ -1765,24 +1883,67 @@ def clear_temp_cookies():
     """Clear temporary cookies."""
     debug('clearing temporary cookies')
     if ua and hasattr(ua, 'cookie_jar'):
-        # Clear temporary cookies
-        ua.cookie_jar.clear_expired_cookies()
+        # Keep parity with Perl implementation.
+        ua.cookie_jar.clear_session_cookies()
 
 def unexpire_cookie(name, context=None):
     """Make a cookie permanent (remove expiry)."""
     if not ua or not hasattr(ua, 'cookie_jar'):
         return
     
-    # This is a simplified version - full implementation would modify cookie expiry
-    debug(f'unexpiring cookie: {name}')
+    cookie = None
+    for c in ua.cookie_jar:
+        if c.name != name:
+            continue
+        domain = (c.domain or '').lstrip('.')
+        if domain == mbank_host:
+            cookie = c
+    
+    if cookie is None:
+        ctx = context or 'cookie'
+        scraping_error(f"{ctx}: cookie {name} missing")
+    
+    if cookie.expires is None or cookie.discard:
+        debug(f"setting expiration date for cookie {name}")
+        cookie.expires = int(1e10)  # ~317 years
+        cookie.discard = False
+    
+    if cookie.expires is None:
+        internal_error(f"cookie {name} does not expire")
+    
+    expires = datetime.fromtimestamp(cookie.expires, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%SZ')
+    debug(f"cookie {name} expires on {expires}")
+
+def get_cookie_info(name):
+    """Get a cookie value for mBank domain."""
+    if not ua or not hasattr(ua, 'cookie_jar'):
+        return None
+    
+    value = None
+    for c in ua.cookie_jar:
+        if c.name != name:
+            continue
+        domain = (c.domain or '').lstrip('.')
+        if domain == mbank_host:
+            value = c.value
+    
+    return value
 
 def get_tabid():
-    """Generate a tab ID."""
-    # Generate a UUID for the tab
-    return gen_uuid()
+    """Read tab ID from mBank cookie."""
+    tabid = get_cookie_info('mBank_tabId')
+    if tabid is None:
+        scraping_error('login.tabid')
+    return match_uuid(tabid, context='login.tabid')
 
 def parse_offline_accounts(json_content):
     """Parse offline accounts from JSON."""
+    def first_defined(*values):
+        for value in values:
+            if value is not None:
+                return value
+        return None
+
     try:
         data = json.loads(json_content)
     except:
@@ -1792,7 +1953,7 @@ def parse_offline_accounts(json_content):
     if isinstance(data, list):
         account_list = data
     elif isinstance(data, dict):
-        account_list = data.get('payload') or data.get('accounts') or data.get('Accounts') or []
+        account_list = first_defined(data.get('payload'), data.get('accounts'), data.get('Accounts'), [])
     else:
         return []
     
@@ -1804,20 +1965,26 @@ def parse_offline_accounts(json_content):
         if not isinstance(a, dict):
             continue
         
-        name = a.get('name') or a.get('productName') or a.get('ProductName') or a.get('externalAccountName') or a.get('accountTypeName')
-        number = a.get('number') or a.get('accountNumber') or a.get('iban') or a.get('Iban')
+        name = first_defined(
+            a.get('name'),
+            a.get('productName'),
+            a.get('ProductName'),
+            a.get('externalAccountName'),
+            a.get('accountTypeName'),
+        )
+        number = first_defined(a.get('number'), a.get('accountNumber'), a.get('iban'), a.get('Iban'))
         
         if not name or not number:
             continue
         
-        bank = a.get('bankName') or a.get('providerName') or a.get('provider') or ''
+        bank = first_defined(a.get('bankName'), a.get('providerName'), a.get('provider'), '')
         
         accounts.append({
             'name': name,
             'number': format_account_number(number),
-            'balance': a.get('balance') or a.get('Balance'),
-            'currency': a.get('currency') or a.get('Currency') or '',
-            'available': a.get('availableBalance') or a.get('AvailableBalance'),
+            'balance': first_defined(a.get('balance'), a.get('Balance')),
+            'currency': first_defined(a.get('currency'), a.get('Currency'), ''),
+            'available': first_defined(a.get('availableBalance'), a.get('AvailableBalance')),
             'source': bank if bank else 'external',
         })
     
@@ -1827,7 +1994,7 @@ def fetch_offline_accounts(login_info):
     """Fetch offline accounts."""
     url = f'{root_url}/api/AccountsAggregation/Accounts/accounts/Offline'
     headers = login_info['headers'].copy()
-    headers['Accept'] = 'application/json'
+    headers.update(header_accept_json)
     
     try:
         # Try POST first
@@ -1861,7 +2028,7 @@ def do_list(login=None, quiet=False):
     
     # Request account list
     headers = login['headers'].copy()
-    headers['Accept'] = 'application/json'
+    headers.update(header_accept_json)
     headers['Content-Type'] = 'application/json; charset=UTF-8'
     
     request = urllib.request.Request(
@@ -1894,8 +2061,8 @@ def do_list(login=None, quiet=False):
             currency = account.get('Currency')
             balance = format_money(account.get('Balance'), currency, context='list.balance')
             available = format_money(account.get('AvailableBalance'), currency, context='list.available')
-            name_bytes = unicode_to_bytes(name)
-            print(f"{name_bytes}\t{number}\t{balance}\t{available}\tmbank")
+            display_name = unicode_display(name)
+            print(f"{display_name}\t{number}\t{balance}\t{available}\tmbank")
     
     # Add offline accounts
     offline_accounts = fetch_offline_accounts(login)
@@ -1910,22 +2077,135 @@ def do_list(login=None, quiet=False):
             if a.get('balance') is not None and cur:
                 try:
                     bal = format_money(a['balance'], cur, context='list.offline.balance')
-                except:
+                except Exception:
                     pass
             
             if a.get('available') is not None and cur:
                 try:
                     avl = format_money(a['available'], cur, context='list.offline.available')
-                except:
+                except Exception:
                     pass
             
-            name_bytes = unicode_to_bytes(a['name'])
-            source_bytes = unicode_to_bytes(a['source'])
-            print(f"{name_bytes}\t{a['number']}\t{bal}\t{avl}\t{source_bytes}")
+            display_name = unicode_display(a['name'])
+            display_source = unicode_display(a['source'])
+            print(f"{display_name}\t{a['number']}\t{bal}\t{avl}\t{display_source}")
     
     return result
 
+def do_lazy_logout(login=None):
+    """Perform lazy logout API call."""
+    if not login:
+        internal_error('do_lazy_logout(): missing login')
+    
+    headers = login['headers'].copy()
+    headers.update(header_accept_json)
+    headers['Content-Type'] = 'application/json'
+    
+    request = urllib.request.Request(
+        f'{base_url}/LoginMain/Account/LazyLogout',
+        data=b'',
+        headers=headers,
+        method='POST'
+    )
+    
+    doc = download(request)
+    data = decode_json(doc['content'], context='logout.json')
+    if not data.get('lazy'):
+        scraping_error('logout.lazy')
+
+def do_logout(maybe=False):
+    """Log out current user session."""
+    login_info = do_login(probe=True)
+    if not login_info:
+        clear_temp_cookies()
+        if maybe:
+            return
+        user_error('logout: the user was not logged in')
+    
+    debug('logging out...')
+    do_lazy_logout(login=login_info)
+    
+    request = urllib.request.Request(
+        f'{base_url}/LoginMain/Account/Logout',
+        headers={'Referer': login_info['url']},
+        method='GET'
+    )
+    simple_download(request)
+    debug('successful logout')
+    
+    clear_temp_cookies()
+
+def _cookiejar_sanity_check_for_register_device():
+    """Ensure cookie jar is writable and persistent."""
+    if not ua or not hasattr(ua, 'cookie_jar'):
+        user_error('missing cookie jar')
+    
+    cookie_jar = ua.cookie_jar
+    cookie_jar_path = getattr(cookie_jar, 'filename', None) or '/dev/null'
+    
+    if cookie_jar_path == '/dev/null':
+        user_error('/dev/null: unwritable cookie file')
+    
+    if not hasattr(cookie_jar, 'save'):
+        user_error(f"{cookie_jar_path}: unwritable cookie file")
+    
+    uuid = gen_uuid()
+    test_cookie = http.cookiejar.Cookie(
+        version=0,
+        name='UUID',
+        value=uuid,
+        port=None,
+        port_specified=False,
+        domain='mbank-cli.test',
+        domain_specified=True,
+        domain_initial_dot=False,
+        path='/cookie-jar',
+        path_specified=True,
+        secure=False,
+        expires=int(time.time()) + 60,
+        discard=False,
+        comment=None,
+        comment_url=None,
+        rest={},
+        rfc2109=False,
+    )
+    cookie_jar.set_cookie(test_cookie)
+    
+    try:
+        cookie_jar.save(ignore_discard=True, ignore_expires=True)
+    except OSError as e:
+        os_error(f"{cookie_jar_path}: {e}")
+    
+    try:
+        cookie_jar.clear(domain='mbank-cli.test', path='/cookie-jar', name='UUID')
+    except KeyError:
+        pass
+    
+    try:
+        with open(cookie_jar_path, 'r', encoding='utf-8', errors='replace') as fh:
+            content = fh.read()
+    except OSError as e:
+        os_error(f"{cookie_jar_path}: {e}")
+    
+    if uuid not in content:
+        user_error(f"{cookie_jar_path}: unwritable cookie file")
+
 # Command implementations
+def cmd_register_device(**kwargs):
+    """Register current device as trusted."""
+    args = kwargs.get('args') or []
+    if len(args) > 1:
+        user_error('register-device: too many arguments')
+    
+    name = args[0] if args else 'CLI'
+    _cookiejar_sanity_check_for_register_device()
+    do_logout(maybe=True)
+    do_login(register_device=name)
+
+def cmd_logout(**kwargs):
+    """Log out."""
+    do_logout()
+
 def cmd_configure(**kwargs):
     """Interactive configuration wizard."""
     config_path = kwargs.get('config_path')
@@ -2095,6 +2375,60 @@ def cmd_history(**kwargs):
     print()
     print("Or try the newer history2019 API (if implemented)")
     sys.exit(1)
+
+def cmd_activate_profile(**kwargs):
+    """Activate personal/business profile."""
+    login_info = kwargs.get('login')
+    args = kwargs.get('args') or []
+    
+    if len(args) < 1:
+        user_error('activate-profile: no profile selected')
+    if len(args) > 1:
+        user_error('activate-profile: too many arguments')
+    
+    name = args[0]
+    profiles = login_info.get('profiles') or {}
+    
+    def sortkey(key):
+        k = re.sub(r'^personal(?:/?|$)', '\x00', key)
+        if k == 'business':
+            k = '\x01'
+        return k
+    
+    if name not in profiles:
+        profile_names = ', or '.join(
+            f'"{pname}"' for pname in sorted(profiles.keys(), key=sortkey)
+        )
+        profile_names = unicode_display(profile_names)
+        user_error(f"activate-profile: invalid profile name (should be {profile_names})")
+    
+    codes = profiles[name]
+    if len(codes) == 0:
+        user_error(f"activate-profile: {name} profile not available")
+    if len(codes) > 1:
+        internal_error('activate-profile: ambiguous profile name')
+    
+    code = codes[0]
+    if code == 'T':
+        # Perl behavior: I (individual) is a superset of T (own products).
+        code = 'I'
+    
+    debug(f'activating profile {code}...')
+    
+    headers = login_info['headers'].copy()
+    headers['Accept'] = '*/*'
+    headers['Content-Type'] = 'application/x-www-form-urlencoded'
+    
+    request = urllib.request.Request(
+        f'{base_url}/LoginMain/Account/JsonActivateProfile',
+        data=urllib.parse.urlencode({'profileCode': code}).encode('utf-8'),
+        headers=headers,
+        method='POST'
+    )
+    download(request)
+    
+    # Response is not valid JSON despite content-type in Perl implementation.
+    do_lazy_logout(login=login_info)
 
 def cmd_not_implemented(command_name):
     """Generic not implemented handler."""
