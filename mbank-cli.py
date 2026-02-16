@@ -4,6 +4,14 @@
 # SPDX-License-Identifier: MIT
 
 import sys
+
+# Check Python version early
+if sys.version_info < (3, 9):
+    print(f"Error: Python 3.9 or later is required", file=sys.stderr)
+    print(f"You are using Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}", file=sys.stderr)
+    print(f"Please upgrade Python or use the original Perl version.", file=sys.stderr)
+    sys.exit(1)
+
 import os
 import re
 import json
@@ -2125,6 +2133,18 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         print("\nInterrupted", file=sys.stderr)
         sys.exit(1)
+    except SystemExit:
+        # Re-raise SystemExit to preserve exit codes
+        raise
+    except Exception as e:
+        # Catch any unexpected errors and display them clearly
+        print(f"\nUnexpected error: {type(e).__name__}: {e}", file=sys.stderr)
+        if opt_verbose or opt_debug_dir:
+            print("\nFull traceback:", file=sys.stderr)
+            traceback.print_exc()
+        else:
+            print("Run with --verbose for full traceback", file=sys.stderr)
+        sys.exit(255)
     finally:
         # Save cookies
         if ua and hasattr(ua, 'cookie_jar'):
