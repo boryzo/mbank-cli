@@ -26,6 +26,8 @@ import ssl
 import time
 import locale
 import codecs
+import gzip
+import zlib
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from html.parser import HTMLParser
@@ -472,10 +474,8 @@ def download(request, ignore_errors=False, redact=None):
         # Handle gzip/deflate encoding
         encoding = response.headers.get('Content-Encoding')
         if encoding == 'gzip':
-            import gzip
             content = gzip.decompress(content)
         elif encoding == 'deflate':
-            import zlib
             content = zlib.decompress(content)
         
         content = content.decode('utf-8', errors='replace')
@@ -527,10 +527,8 @@ def download(request, ignore_errors=False, redact=None):
                 # Handle gzip/deflate encoding
                 encoding = e.headers.get('Content-Encoding')
                 if encoding == 'gzip':
-                    import gzip
                     content = gzip.decompress(content)
                 elif encoding == 'deflate':
-                    import zlib
                     content = zlib.decompress(content)
                 
                 content = content.decode('utf-8', errors='replace')
