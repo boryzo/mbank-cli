@@ -521,7 +521,22 @@ def download(request, ignore_errors=False, redact=None):
     except urllib.error.HTTPError as e:
         if isinstance(ignore_errors, list):
             if e.code in ignore_errors:
-                return {'response': e, 'content': '', 'url': url}
+                # Read error response content (similar to Perl's decoded_content)
+                content = e.read()
+                
+                # Handle gzip/deflate encoding
+                encoding = e.headers.get('Content-Encoding')
+                if encoding == 'gzip':
+                    import gzip
+                    content = gzip.decompress(content)
+                elif encoding == 'deflate':
+                    import zlib
+                    content = zlib.decompress(content)
+                
+                content = content.decode('utf-8', errors='replace')
+                content = content.replace('\r', '')
+                
+                return {'response': e, 'content': content, 'url': url}
         if not ignore_errors:
             class FakeRequest:
                 def __init__(self, method, url):
