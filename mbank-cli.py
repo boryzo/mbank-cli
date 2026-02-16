@@ -510,12 +510,6 @@ def format_account_number(number):
     
     number = number.replace('PL', '', 1)
     number = number.replace(' ', '')
-    
-    if re.match(r'^\d{26}$', number):
-        m = re.match(r'^(\d{2})(\d{4})(\d{4})(\d{4})(\d{4})(\d{4})(\d{4})$', number)
-        if m:
-            number = ' '.join(m.groups())
-    
     return number
 
 def format_money(number, currency, context=None):
@@ -1287,6 +1281,7 @@ def normalize_mbank_account(raw_account):
         name += f" - {subtitle}"
 
     number = match(raw_account.get('AccountNumber', ''), account_number_re, context='list.account-number')
+    number = format_account_number(number)
     return {
         'name': name,
         'number': number,
