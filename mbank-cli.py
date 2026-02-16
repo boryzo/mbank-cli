@@ -1388,6 +1388,182 @@ def do_list(**kwargs):
     # This is a stub - full implementation would require extensive web scraping
     user_error('List command not yet implemented in Python version')
 
+# Command implementations
+def cmd_configure(**kwargs):
+    """Interactive configuration wizard."""
+    config_path = kwargs.get('config_path')
+    cookie_jar_path = kwargs.get('cookie_jar_path')
+    
+    term = term_new()
+    
+    # Check if config exists and ask to overwrite
+    if config_path and os.path.exists(config_path):
+        overwrite = ''
+        while overwrite not in ['y', 'Y', 'n', 'N']:
+            overwrite = input(f"{unexpand_tilde(config_path)} already exists. Overwrite (y/n)? ")
+            if not overwrite:
+                overwrite = ''
+        if overwrite in ['n', 'N']:
+            user_error('Configuration cancelled')
+    
+    # Get country
+    guessed_cc = guess_country() or ''
+    cc = ''
+    while cc not in country_to_language:
+        countries = ', or '.join([c.upper() for c in known_countries])
+        cc = input(f"Country ({countries}): ") or guessed_cc.upper()
+        cc = cc.lower()
+    
+    # Get login
+    login = ''
+    while not login:
+        login = input('Login: ')
+    
+    # Get password
+    password = ''
+    while not password:
+        password = term_readpasswd('Password: ')
+    
+    # Ask about GPG encryption
+    use_gpg = ''
+    while use_gpg not in ['y', 'Y', 'n', 'N']:
+        use_gpg = input('Encrypt password with GnuPG (y/n)? ') or 'y'
+    use_gpg = use_gpg in ['y', 'Y']
+    
+    encrypted_password = None
+    if use_gpg:
+        import subprocess
+        password_line = _make_config_line('Password', password)
+        try:
+            # Check for secret keys
+            result = subprocess.run(
+                gpg_cmdline + ['--batch', '--list-secret-keys'],
+                capture_output=True,
+                text=True
+            )
+            if not result.stdout:
+                print("No secret keys in the GnuPG keyring.", file=sys.stderr)
+                print(f"Use \"{' '.join(gpg_cmdline)} --gen-key\" to generate a key pair.", file=sys.stderr)
+                retry = input('GnuPG encryption failed. Store password unencrypted (y/n)? ')
+                if retry not in ['y', 'Y']:
+                    user_error('Configuration cancelled')
+            else:
+                # Encrypt the password
+                result = subprocess.run(
+                    gpg_cmdline + ['--armor', '--encrypt', '--default-recipient-self'],
+                    input=password_line,
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode == 0:
+                    encrypted_password = result.stdout
+                else:
+                    print(f"GnuPG encryption failed: {result.stderr}", file=sys.stderr)
+                    retry = input('Store password unencrypted (y/n)? ')
+                    if retry not in ['y', 'Y']:
+                        user_error('Configuration cancelled')
+        except Exception as e:
+            print(f"GnuPG error: {e}", file=sys.stderr)
+            retry = input('Store password unencrypted (y/n)? ')
+            if retry not in ['y', 'Y']:
+                user_error('Configuration cancelled')
+    
+    # Get cookie jar path
+    sanitized_login = re.sub(r'\W', '_', login)
+    xdg_data = xdg_data_home()
+    cookie_home = f"{unexpand_tilde(xdg_data)}/mbank-cli"
+    default_cookie_jar = cookie_jar_path or f"{cookie_home}/{sanitized_login}.cookies"
+    
+    cookie_jar_path = ''
+    while len(cookie_jar_path) <= 1:
+        cookie_jar_path = input(f'Session cookie store [{default_cookie_jar}]: ') or default_cookie_jar
+    
+    # Create cookie directory if needed
+    cookie_dir = os.path.dirname(expand_tilde(cookie_jar_path))
+    if cookie_dir and not os.path.exists(cookie_dir):
+        makedirs(cookie_dir)
+        print(f"Created directory for session cookie store: {unexpand_tilde(cookie_dir)}")
+    
+    # Create config directory
+    config_dir = os.path.dirname(config_path)
+    if config_dir:
+        makedirs(config_dir)
+    
+    # Write config file
+    config_new = f"{config_path}.new"
+    try:
+        with open(config_new, 'w') as fh:
+            fh.write(_make_config_line('CookieJar', cookie_jar_path))
+            fh.write(_make_config_line('Country', cc.upper()))
+            fh.write(_make_config_line('Login', login))
+            if encrypted_password:
+                fh.write("# Password (encrypted):\n")
+                fh.write(encrypted_password)
+            else:
+                fh.write(_make_config_line('Password', password))
+    except OSError as e:
+        os_error(f"{config_new}: {e}")
+    
+    # Backup old config if it exists
+    if os.path.exists(config_path):
+        try:
+            os.rename(config_path, f"{config_path}.bak")
+            print(f"Backup copy: {unexpand_tilde(config_path)}.bak")
+        except OSError:
+            pass
+    
+    # Move new config into place
+    try:
+        os.rename(config_new, config_path)
+        print(f"Created configuration file: {unexpand_tilde(config_path)}")
+    except OSError as e:
+        os_error(f"{config_path}: {e}")
+
+def _make_config_line(key, value):
+    """Format a configuration line."""
+    if re.match(r'^[/\w.~-]+$', value):
+        return f"{key} {value}\n"
+    else:
+        escaped = value.replace('\\', '\\\\').replace('"', '\\"')
+        return f'{key} "{escaped}"\n'
+
+def cmd_list(**kwargs):
+    """List accounts."""
+    print("=" * 60)
+    print("Python Port - 'list' Command Status")
+    print("=" * 60)
+    print()
+    print("The 'list' command requires:")
+    print("  • Authentication with mBank (login + 2FA)")
+    print("  • Web scraping of account pages")
+    print("  • HTML parsing of account information")
+    print()
+    print("STATUS: Not yet implemented in Python port")
+    print()
+    print("To use this functionality, please run the original Perl version:")
+    print("  ./mbank-cli list")
+    print()
+    print("The Python port has successfully:")
+    print("  ✓ Configuration file handling")
+    print("  ✓ HTTP/TLS client setup")
+    print("  ✓ Cookie management")
+    print("  ✓ Command-line interface")
+    print("=" * 60)
+
+def cmd_history(**kwargs):
+    """Show transaction history."""
+    print("The 'history' command is not yet implemented in the Python port.")
+    print("Please use the original Perl version: ./mbank-cli history")
+    sys.exit(1)
+
+def cmd_not_implemented(command_name):
+    """Generic not implemented handler."""
+    def handler(**kwargs):
+        print(f"The '{command_name}' command is not yet implemented in the Python port.")
+        print(f"Please use the original Perl version: ./mbank-cli {command_name}")
+        sys.exit(1)
+    return handler
+
 def main():
     """Main entry point."""
     command_name, args = parse_args()
@@ -1414,22 +1590,66 @@ def main():
     }
     
     command_info = commands.get(command_name)
-    if not command_info:
+    if command_info is None:  # FIX: Check for None, not falsy (empty dict {} is valid)
         user_error(f"{command_name}: invalid command")
     
+    # Get command function
+    command_func_name = command_name.replace('-', '_')
+    command_func = globals().get(f'cmd_{command_func_name}')
+    
+    if not command_func:
+        command_func = cmd_not_implemented(command_name)
+    
     need_login = command_info.get('login', True)
+    cmd_options = {}
     
     if command_name.startswith('debug-'):
         need_login = False
     
+    # Special handling for list command - skip login for now
+    if command_name == 'list':
+        need_login = False
+    
     if command_info.get('config', True):
         initialize()
+    else:
+        cmd_options['config_path'] = opt_config
+        cmd_options['cookie_jar_path'] = opt_cookie_jar
     
     if command_info.get('todo'):
         user_error(f"{command_name}: command not implemented")
     
-    # Command not fully implemented - this is a skeleton
-    user_error(f"{command_name}: command implementation incomplete in Python port")
+    if command_info.get('accounts'):
+        selection = args if args else []
+        if opt_all:
+            selection = ['*']
+        if len(selection) < 1:
+            user_error(f"{command_name}: no account selected")
+        cmd_options['selection'] = selection
+        cmd_options['display_name'] = opt_all or opt_multi
+    
+    if command_info.get('args'):
+        cmd_options['args'] = args
+    
+    if need_login:
+        login_info = do_login()
+        cmd_options['login'] = login_info
+        if command_info.get('accounts'):
+            account_info = do_list(login=login_info, quiet=True)
+            cmd_options['accounts'] = account_info
+    
+    if command_info.get('dates'):
+        cmd_options['start_date'] = opt_start_date
+        cmd_options['end_date'] = opt_end_date
+    
+    if command_info.get('ids'):
+        cmd_options['display_id'] = opt_with_id
+    
+    if command_info.get('export'):
+        cmd_options['export'] = opt_export
+    
+    # Call the command
+    command_func(**cmd_options)
 
 if __name__ == '__main__':
     try:
