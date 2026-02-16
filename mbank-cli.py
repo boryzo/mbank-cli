@@ -453,6 +453,19 @@ def http_init(cookie_jar=None, ca=None):
     
     return ua
 
+def _decode_http_content(content, headers):
+    """Decode HTTP content handling gzip/deflate encoding."""
+    # Handle gzip/deflate encoding
+    encoding = headers.get('Content-Encoding')
+    if encoding == 'gzip':
+        content = gzip.decompress(content)
+    elif encoding == 'deflate':
+        content = zlib.decompress(content)
+    
+    content = content.decode('utf-8', errors='replace')
+    content = content.replace('\r', '')
+    return content
+
 def download(request, ignore_errors=False, redact=None):
     """Download content from a URL."""
     method = request.get_method()
@@ -470,16 +483,7 @@ def download(request, ignore_errors=False, redact=None):
     try:
         response = ua.open(request, timeout=http_timeout)
         content = response.read()
-        
-        # Handle gzip/deflate encoding
-        encoding = response.headers.get('Content-Encoding')
-        if encoding == 'gzip':
-            content = gzip.decompress(content)
-        elif encoding == 'deflate':
-            content = zlib.decompress(content)
-        
-        content = content.decode('utf-8', errors='replace')
-        content = content.replace('\r', '')
+        content = _decode_http_content(content, response.headers)
         
         # Save debug output
         if opt_debug_dir:
@@ -524,15 +528,7 @@ def download(request, ignore_errors=False, redact=None):
                 # Read error response content (similar to Perl's decoded_content)
                 content = e.read()
                 
-                # Handle gzip/deflate encoding
-                encoding = e.headers.get('Content-Encoding')
-                if encoding == 'gzip':
-                    content = gzip.decompress(content)
-                elif encoding == 'deflate':
-                    content = zlib.decompress(content)
-                
-                content = content.decode('utf-8', errors='replace')
-                content = content.replace('\r', '')
+                content = _decode_http_content(content, e.headers)
                 
                 return {'response': e, 'content': content, 'url': url}
         if not ignore_errors:
