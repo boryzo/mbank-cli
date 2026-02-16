@@ -2,6 +2,18 @@
 
 This is a 1:1 port of the Perl-based mbank-cli to Python 3.9+.
 
+## ⚠️ Requirements
+
+**Python 3.9 or later is required!**
+
+The port uses features from Python 3.9+ including:
+- `zoneinfo` module for timezone handling
+- Modern type hints and syntax
+
+If you have Python 3.8 or earlier, you'll get a clear error message. Please either:
+- Upgrade to Python 3.9+, or
+- Use the original Perl version (./mbank-cli)
+
 ## ✅ Status - FUNCTIONAL!
 
 ### Working Commands
@@ -230,6 +242,59 @@ def cmd_deposits(**kwargs):
 ✅ **Verified:**
 - CodeQL scan: 0 alerts
 - Code review: No issues
+
+## Troubleshooting
+
+### Python Version Error
+
+If you see:
+```
+Error: Python 3.9 or later is required
+You are using Python 3.x.x
+```
+
+**Solution:** Upgrade Python or use the Perl version.
+
+**Check your Python version:**
+```bash
+python3 --version
+```
+
+**macOS:** `brew install python@3.9` or later  
+**Ubuntu/Debian:** `sudo apt install python3.9` or later  
+**Windows:** Download from python.org
+
+### Import Errors
+
+The script uses only built-in Python 3.9+ modules. If you get import errors, check:
+1. Python version is 3.9+
+2. No corrupted Python installation
+3. Try reinstalling Python
+
+### Verbose Error Messages
+
+For detailed error information:
+```bash
+python3 mbank-cli.py --verbose list
+```
+
+Or enable debug mode:
+```bash
+python3 mbank-cli.py --debug /tmp/mbank-debug list
+```
+
+This saves detailed logs to `/tmp/mbank-debug/log`.
+
+### Common Issues
+
+**"missing configuration file"**
+→ Run `python3 mbank-cli.py configure` first
+
+**"invalid command"**
+→ Check available commands with `--help`
+
+**Unexpected errors**
+→ Use `--verbose` flag for full traceback
 
 ## License
 
