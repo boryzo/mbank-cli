@@ -2016,8 +2016,16 @@ def cmd_list(**kwargs):
 
 def cmd_history(**kwargs):
     """Show transaction history."""
-    print("The 'history' command is not yet implemented in the Python port.")
-    print("Please use the original Perl version: ./mbank-cli history")
+    print("The 'history' command requires full implementation of:")
+    print("  • History API integration")
+    print("  • CSV parsing and formatting")
+    print("  • Date range handling")
+    print()
+    print("This is a complex command (~500 lines of code).")
+    print("For now, please use the original Perl version:")
+    print("  ./mbank-cli history ACCOUNT")
+    print()
+    print("Or try the newer history2019 API (if implemented)")
     sys.exit(1)
 
 def cmd_not_implemented(command_name):

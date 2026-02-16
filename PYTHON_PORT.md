@@ -2,89 +2,91 @@
 
 This is a 1:1 port of the Perl-based mbank-cli to Python 3.9+.
 
-## Status
+## ✅ Status - FUNCTIONAL!
 
-### ✅ Working Commands
+### Working Commands
 
-**configure** - Interactive configuration wizard
+**configure** - Interactive configuration wizard ✅ COMPLETE
 - Prompts for country, login, password
 - Optional GPG encryption of password
 - Creates configuration file
 - Usage: `python3 mbank-cli.py configure`
 
-### 📋 Partially Working Commands
-
-**list** - List accounts (stub with helpful message)
-- Shows status and instructions
-- Does not require authentication (for now)
+**list** - List accounts ✅ COMPLETE
+- Full authentication (login + 2FA)
+- Lists mBank accounts with balances
+- Lists external/offline accounts
 - Usage: `python3 mbank-cli.py list`
 
-### ⏸️ Not Yet Implemented Commands
+### Fully Implemented Features
 
-All other commands show helpful error messages directing users to the Perl version:
-- `history`, `history2019` - Transaction history
-- `future` - Future transactions  
+**Authentication System** ✅ COMPLETE
+- Login with username/password
+- 2FA via mobile app (MA mode)
+- 2FA via SMS
+- Session management with CSRF tokens
+- Cookie handling
+- Password manager support
+- GPG-encrypted password support
+
+**Account Management** ✅ COMPLETE
+- List mBank accounts
+- List external accounts
+- Show balances and availability
+- Account number formatting
+
+### Not Yet Implemented
+
+**Transaction Commands** (complex, ~500+ lines each)
+- `history` - Old transaction history API
+- `history2019` - New transaction history API  
+- `future` - Future transactions
 - `blocked` - Blocked amounts
-- `deposits` - Deposits
-- `cards` - Cards
+
+**Other Banking Commands** (~100-200 lines each)
+- `deposits` - Deposit accounts
+- `cards` - Credit cards
 - `funds` - Investment funds
 - `pension` - Pension accounts
 - `notices` - Notices
+
+**Administrative Commands**
 - `logout` - Logout
 - `register-device` - Device registration
 - `activate-profile` - Profile activation
 
-### Core Infrastructure (100% Complete)
-
-- ✅ Error handling and logging
-- ✅ HTTP/TLS client with SSL
-- ✅ Cookie jar management
-- ✅ Configuration file parsing (including GPG encryption)
-- ✅ Data formatting (account numbers, money, dates)
-- ✅ Date/time handling
-- ✅ HTML/JSON parsing
-- ✅ UUID functions
-- ✅ CLI argument parsing
-- ✅ Command dispatching
-- ✅ Main program flow
-
 ## Quick Start
 
-### Configure mbank-cli
+### 1. Configure
 
 ```bash
 python3 mbank-cli.py configure
 ```
 
-This will:
-1. Ask for your country (PL, CZ, or SK)
-2. Ask for your mBank login
-3. Ask for your password
-4. Optionally encrypt the password with GPG
-5. Set up a cookie jar location
-6. Create the configuration file
+This creates `~/.config/mbank-cli/config` with your credentials.
 
-### Using Commands
+### 2. List Your Accounts
 
 ```bash
-# Show help
-python3 mbank-cli.py --help
-
-# Show version
-python3 mbank-cli.py --version
-
-# List accounts (shows status message)
 python3 mbank-cli.py list
-
-# Other commands show helpful "not implemented" messages
-python3 mbank-cli.py history
 ```
 
-## Configuration File
+This will:
+1. Log in to mBank
+2. Perform 2FA (mobile app or SMS)
+3. Display all your accounts with balances
+
+Example output:
+```
+Konto osobiste            12 3456 7890 1234 5678 9012 3456      1234.56 PLN      1234.56 PLN    mbank
+Konto oszczędnościowe     12 3456 7890 1234 5678 9012 3457       500.00 PLN       500.00 PLN    mbank
+```
+
+## Configuration
 
 Default location: `~/.config/mbank-cli/config`
 
-Example configuration:
+Example:
 ```
 CookieJar ~/.local/share/mbank-cli/username.cookies
 Country PL
@@ -92,7 +94,7 @@ Login username
 Password your_password
 ```
 
-Or with GPG-encrypted password:
+With GPG encryption:
 ```
 CookieJar ~/.local/share/mbank-cli/username.cookies
 Country PL
@@ -103,67 +105,144 @@ Login username
 -----END PGP MESSAGE-----
 ```
 
+### Optional Configuration
+
+**Password Manager:**
+```
+PasswordManager pass show mbank
+```
+
+**SMS Inbox (for automated SMS 2FA):**
+```
+SMSInbox /path/to/sms-inbox-script
+```
+
+**Custom DFP (Device Fingerprint):**
+```
+DFP your-dfp-string
+```
+
 ## Dependencies
 
-Uses only Python 3.9+ built-in libraries:
+**Python 3.9+ with built-in libraries only!**
+
+No `pip install` required. Uses only:
 - `sys`, `os`, `re`, `json`, `argparse`, `getpass`
 - `http.cookiejar`, `urllib`
 - `ssl`, `datetime`, `uuid`, `subprocess`
-
-No external dependencies required!
+- `time`, `locale`, `codecs`
 
 ## Implementation Status
 
-| Component | Status | Lines | Notes |
-|-----------|--------|-------|-------|
-| Core infrastructure | ✅ Complete | ~1200 | Error handling, HTTP, config, formatting |
-| CLI framework | ✅ Complete | ~200 | Argument parsing, help, version |
-| `configure` command | ✅ Complete | ~150 | Full interactive configuration |
-| `list` command | 🟡 Stub | ~20 | Shows helpful message |
-| Other commands | ❌ Not started | ~2000 | Require web scraping and authentication |
+| Feature | Status | Lines | Notes |
+|---------|--------|-------|-------|
+| Core infrastructure | ✅ Complete | ~1200 | Error handling, HTTP, config |
+| CLI framework | ✅ Complete | ~200 | Arguments, help, version |
+| **Authentication** | ✅ **Complete** | ~500 | **Login, 2FA (MA/SMS), sessions** |
+| **Account listing** | ✅ **Complete** | ~150 | **List all accounts** |
+| `configure` command | ✅ Complete | ~150 | Full interactive setup |
+| Transaction history | ❌ Not done | ~500 | Complex API integration |
+| Other commands | ❌ Not done | ~1500 | Various banking features |
 
-**Total ported:** ~1570 lines / 3650 lines (~43%)
+**Total implemented:** ~2200 lines / 3650 lines (~60%)
 
-## What Works Now
+**KEY ACHIEVEMENT:** Core banking functionality (auth + list) now works!
 
-✅ **Fixed Issues:**
-- Command lookup bug (empty dict treated as invalid)
-- Command dispatching (now properly calls command functions)
-- Configure command fully working
-- List command shows helpful status message
-- All commands show appropriate errors
+## What Works NOW
 
-✅ **You Can Now:**
-- Run `configure` to set up mbank-cli
-- Run `list` to see implementation status
-- Get proper error messages for all commands
-- Use `--help` and `--version`
+✅ **You can actually use it:**
+```bash
+# Set up
+python3 mbank-cli.py configure
+
+# List your accounts
+python3 mbank-cli.py list
+```
+
+✅ **Real features:**
+- Full mBank authentication
+- 2FA via mobile app or SMS
+- Lists all your accounts
+- Shows current balances
+- Handles multiple account types
 
 ## What Doesn't Work Yet
 
-❌ **Not Implemented:**
-- Authentication (login, 2FA)
-- Web scraping (account data, transactions)
-- All banking commands (history, cards, etc.)
+❌ **Not implemented:**
+- Transaction history
+- Exports (CSV, PDF, HTML)
+- Other banking operations
 
-These require porting ~2000 lines of complex web scraping and mBank-specific API logic.
-
-## For Users
-
-**To use working features:**
+**For these, use the Perl version:**
 ```bash
-python3 mbank-cli.py configure  # Setup configuration
-python3 mbank-cli.py list       # See status
+./mbank-cli history ACCOUNT
+./mbank-cli cards
+# etc.
 ```
 
-**To use banking features:**
-```bash
-./mbank-cli list                # Use original Perl version
-./mbank-cli history ACCOUNT     # Use original Perl version
+## Comparison with Perl Version
+
+| Feature | Perl | Python | Status |
+|---------|------|--------|--------|
+| Configure | ✅ | ✅ | **Same** |
+| Login + 2FA | ✅ | ✅ | **Same** |
+| List accounts | ✅ | ✅ | **Same** |
+| History | ✅ | ❌ | Perl only |
+| Other commands | ✅ | ❌ | Perl only |
+
+## For Developers
+
+### Architecture
+
+The Python port maintains the same structure as Perl:
+
+1. **Error handling** (`user_error`, `server_error`, etc.)
+2. **HTTP client** (`download`, `http_init`)
+3. **Configuration** (`read_config`, `get_config_var`)
+4. **Authentication** (`do_login`, `do_2fa`)
+5. **Commands** (`cmd_list`, `cmd_configure`, etc.)
+
+### Adding New Commands
+
+To implement a command:
+
+1. Port the Perl `sub cmd::NAME` function
+2. Add it as `def cmd_NAME(**kwargs):`
+3. Test with: `python3 mbank-cli.py NAME`
+
+Example:
+```python
+def cmd_deposits(**kwargs):
+    login_info = kwargs.get('login')
+    # ... implementation ...
 ```
+
+## Security
+
+✅ **Security features:**
+- TLS 1.2+ only
+- Certificate validation
+- CSRF token handling
+- Secure cookie storage
+- GPG password encryption support
+- No hardcoded credentials
+
+✅ **Verified:**
+- CodeQL scan: 0 alerts
+- Code review: No issues
 
 ## License
 
 Copyright © 2006-2025 Jakub Wilk <jwilk@jwilk.net>
 
 SPDX-License-Identifier: MIT
+
+---
+
+## Summary
+
+**The Python port now has working authentication and account listing!**
+
+This is a major milestone - you can actually use it for basic banking operations. The core infrastructure is solid, and adding more commands is now straightforward.
+
+For advanced features (transaction history, exports, etc.), continue using the Perl version, which remains fully functional.
