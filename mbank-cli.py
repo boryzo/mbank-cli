@@ -1472,7 +1472,7 @@ def do_login(probe=False, register_device=None):
             user_error('login failed: empty password')
         
         # Make sure the SMSInbox feature is configured properly before we
-        # try to log in:
+        # try to log in (dummy date/number, try_num=0 triggers pre-check only):
         if get_config_var('smsinbox'):
             _ask_for_sms_password('2006-07-30', 1, 0)
         
@@ -1627,9 +1627,9 @@ def do_2fa(device_to_add=None):
             if unique_data.get('isUnique'):
                 break
             print('Device name has been rejected. Try another one.', file=sys.stderr)
-            device_to_add = input('Device name: ') or device_to_add
-            if len(device_to_add) <= 1:
-                continue
+            new_name = input('Device name: ').strip()
+            if len(new_name) > 1:
+                device_to_add = new_name
         mod_data['authorizationAction'] = 2  # AddTrusted
         mod_data['deviceName'] = device_to_add
     
@@ -1734,8 +1734,6 @@ def _ask_for_sms_password(date, n, try_num):
     """
     smsinbox = get_config_var('smsinbox')
     if smsinbox:
-        # Validate smsinbox exists and is executable
-        smsinbox_path = os.path.expanduser(smsinbox.split()[0])
         if try_num == 0:
             # Pre-check mode: just validate configuration
             return None
