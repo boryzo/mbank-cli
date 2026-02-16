@@ -1,20 +1,9 @@
 #!/usr/bin/env python3
 
-# Copyright © 2006-2025 Jakub Wilk <jwilk@jwilk.net>
-# SPDX-License-Identifier: MIT
-
-# NOTE: This is mbank-cli.py (Python version)
-# Run with: python3 mbank-cli.py [command]
-# NOT: python3 mbank-cli (that's the Perl version and won't work with Python!)
+# Python port of the original mbank-cli by Jakub Wilk <jwilk@jwilk.net>.
+# Original project: https://github.com/jwilk/mbank-cli
 
 import sys
-
-# Check Python version early
-if sys.version_info < (3, 9):
-    print(f"Error: Python 3.9 or later is required", file=sys.stderr)
-    print(f"You are using Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}", file=sys.stderr)
-    print(f"Please upgrade Python or use the original Perl version.", file=sys.stderr)
-    sys.exit(1)
 
 import os
 import re
@@ -29,24 +18,13 @@ import urllib.error
 import ssl
 import time
 import locale
-import codecs
 import gzip
 import zlib
-from datetime import datetime, timezone, timedelta
-from pathlib import Path
-from html.parser import HTMLParser
-import xml.etree.ElementTree as ET
-
-# ==========================
-# logging and error handling
-# ==========================
+from datetime import datetime, timezone
 
 opt_verbose = 0
 opt_debug_dir = None
 opt_debug_interactive = 0
-bugtracker = 'https://github.com/jwilk/mbank-cli/issues'
-bugreport_url_tmpl = f"{bugtracker}/%d"
-bugreport_request = f"Please file a bug at <{bugtracker}>."
 
 def write_log(message):
     """Write a message to the log file."""
@@ -105,28 +83,13 @@ def http_error(request, response):
     print(message, file=sys.stderr)
     server_error()
 
-def http_decoding_error(request):
-    """Handle HTTP decoding errors."""
-    message = f'HTTP decoding error on <{request.method} {request.full_url}>'
-    write_log(message)
-    traceback.print_stack()
-    print(message, file=sys.stderr)
-    server_error()
-
 def scraping_error(message):
     """Handle web scraping errors."""
     message = f"Scraping error: {message}"
     write_log(message)
     traceback.print_stack()
     print(message, file=sys.stderr)
-    print(bugreport_request, file=sys.stderr)
     sys.exit(3)
-
-def normalize_whitespace(s):
-    """Normalize whitespace in a string."""
-    s = re.sub(r'\s+', ' ', s)
-    s = s.strip()
-    return s
 
 def quote(x):
     """Quote a value for display."""
@@ -143,6 +106,12 @@ def quote(x):
         return f"/{pattern}/{flags}"
     else:
         return json.dumps(x, ensure_ascii=True, allow_nan=False)
+
+def first_defined(*values):
+    for value in values:
+        if value is not None:
+            return value
+    return None
 
 def match(text, pattern, context=None):
     """Match text against a pattern with context."""
@@ -188,27 +157,6 @@ def check_type(obj, type_template, context=None):
     
     return obj
 
-def unpack_list(dst, src, context=None):
-    """Unpack a list into variables."""
-    if not isinstance(dst, list):
-        internal_error('unpack_list(): invalid argument', 1)
-    
-    if not isinstance(src, list):
-        scraping_error(f"{context}: not an array")
-    
-    n = len(dst)
-    m = len(src)
-    s = '' if n == 1 else 's'
-    
-    if n != m:
-        scraping_error(f"{context}: expected {n} element{s}, got {m}")
-    
-    for i in range(n):
-        var = dst[i]
-        val = src[i]
-        if var is not None:
-            var[0] = val
-
 def os_error(message):
     """Handle OS errors."""
     caller_name = traceback.extract_stack()[-2].name
@@ -224,113 +172,13 @@ def internal_error(message, level=0):
     write_log(message)
     traceback.print_stack()
     print(message, file=sys.stderr)
-    print(bugreport_request, file=sys.stderr)
     sys.exit(255)
 
-def known_bug(bugno, message):
-    """Report a known bug."""
-    url = bugreport_url_tmpl % bugno
-    message += f"; see <{url}>"
-    warning(message)
-    sys.exit(255)
-
-def kwargs(options, **args):
-    """Process keyword arguments with validation."""
-    caller = traceback.extract_stack()[-2].name
-    
-    for name, var_info in args.items():
-        has_default = False
-        value = None
-        
-        if isinstance(var_info, list):
-            if len(var_info) != 2:
-                internal_error('kwargs(): invalid argument', 1)
-            var, value = var_info
-            has_default = True
-        else:
-            var = var_info
-        
-        if name in options:
-            value = options.pop(name)
-        elif not has_default:
-            internal_error(f"{caller}(): missing keyword argument: {name}", 1)
-        
-        var[0] = value
-    
-    if options:
-        names = sorted(options.keys())
-        s = 's' if len(names) > 1 else ''
-        message = f"{caller}(): invalid keyword argument{s}: {', '.join(names)}"
-        internal_error(message, 1)
-
-# ====================
-# internationalization
-# ====================
-
-_encoding_fallback = {
-    0x104: 'A', 0x105: 'a',  # letter A with ogonek
-    0x0C1: 'A', 0x0E1: 'a',  # letter A with acute
-    0x0C4: 'A', 0x0E4: 'a',  # letter A with diaeresis
-    0x106: 'C', 0x107: 'c',  # letter C with acute
-    0x10C: 'C', 0x10D: 'c',  # letter C with caron
-    0x10E: 'D', 0x10F: 'd',  # letter D with caron
-    0x118: 'E', 0x119: 'e',  # letter E with ogonek
-    0x0C9: 'E', 0x0E9: 'e',  # letter E with acute
-    0x11A: 'E', 0x11B: 'e',  # letter E with caron
-    0x0CD: 'I', 0x0ED: 'i',  # letter I with acute
-    0x141: 'L', 0x142: 'l',  # letter L with stroke
-    0x139: 'L', 0x13A: 'l',  # letter L with acute
-    0x13D: 'L', 0x13E: 'l',  # letter L with caron
-    0x143: 'N', 0x144: 'n',  # letter N with acute
-    0x147: 'N', 0x148: 'n',  # letter N with caron
-    0x0D3: 'O', 0x0F3: 'o',  # letter O with acute
-    0x0D4: 'O', 0x0F4: 'o',  # letter O with circumflex
-    0x154: 'R', 0x155: 'r',  # letter R with acute
-    0x158: 'R', 0x159: 'r',  # letter R with caron
-    0x15A: 'S', 0x15B: 's',  # letter S with acute
-    0x160: 'S', 0x161: 's',  # letter S with caron
-    0x164: 'T', 0x165: 't',  # letter T with caron
-    0x0DA: 'U', 0x0FA: 'u',  # letter U with acute
-    0x16E: 'U', 0x16F: 'u',  # letter U with ring above
-    0x0DD: 'Y', 0x0FD: 'y',  # letter Y with acute
-    0x179: 'Z', 0x17A: 'z',  # letter Z with acute
-    0x17B: 'Z', 0x17C: 'z',  # letter Z with dot above
-    0x17D: 'Z', 0x17E: 'z',  # letter Z with caron
-}
-
-def _encoding_fallback_fn(u):
-    """Get fallback character for encoding."""
-    return _encoding_fallback.get(u, f'<U+{u:04X}>')
-
-def bytes_to_unicode(u, encoding=None):
-    """Convert bytes to unicode string."""
-    if encoding is None:
-        encoding = locale.getpreferredencoding(False)
-    return u.decode(encoding)
-
-def unicode_to_bytes(s, encoding=None):
-    """Convert unicode string to bytes with fallback."""
-    if encoding is None:
-        encoding = locale.getpreferredencoding(False)
-    
-    def error_handler(exc):
-        if isinstance(exc, UnicodeEncodeError):
-            result = []
-            for i in range(exc.start, exc.end):
-                c = ord(exc.object[i])
-                fallback = _encoding_fallback_fn(c)
-                result.append(fallback)
-            return (''.join(result), exc.end)
-        raise exc
-    
-    codecs.register_error('custom_fallback', error_handler)
-    return s.encode(encoding, errors='custom_fallback')
-
-def unicode_display(s, encoding=None):
-    """Convert text to terminal-safe string (without Python bytes repr)."""
-    if encoding is None:
-        encoding = locale.getpreferredencoding(False)
-    return unicode_to_bytes(s, encoding=encoding).decode(encoding, errors='replace')
+def unicode_display(s):
+    """Convert text for terminal display."""
+    if s is None:
+        return ''
+    return str(s)
 
 country_to_language = {
     'cz': 'cs',  # Czech Republic => Czech
@@ -338,87 +186,25 @@ country_to_language = {
     'sk': 'sk',  # Slovakia => Slovak
 }
 
-language_to_country = {v: k for k, v in country_to_language.items()}
-
-locale_aliases = {
-    'polish': 'pl',
-    'czech': 'cs',
-    'slovak': 'sk',
-}
-
-tz_to_language = {
-    'Europe/Bratislava': 'sk',
-    'Europe/Prague': 'cz',
-    'Europe/Warsaw': 'pl',
-}
-
 known_countries = sorted(country_to_language.keys())
 
-def get_tz():
-    """Get the current timezone."""
-    tz = os.environ.get('TZ')
-    if tz:
-        tz = tz.lstrip(':')
-        return tz
-    
-    try:
-        tz_link = os.readlink('/etc/localtime')
-        tz = re.sub(r'.*/zoneinfo/', '', tz_link)
-        return tz
-    except:
-        pass
-    
-    try:
-        with open('/etc/timezone', 'r') as fh:
-            tz = fh.read().strip()
-            return tz
-    except:
-        pass
-    
-    return None
-
 def guess_country():
-    """Guess the country from locale settings."""
-    cc = {}
-    
+    """Guess country code from locale."""
     try:
-        locales = locale.getlocale()
-        locale_str = locales[0] if locales[0] else ''
-        
-        # Check locale
-        if locale_str:
-            locale_name = locale_aliases.get(locale_str.lower(), locale_str)
-            lang = locale_name.split('_')[0]
-            country = language_to_country.get(lang)
-            if country:
-                cc[country] = True
-    except:
-        pass
-    
-    cc_list = list(cc.keys())
-    if len(cc_list) == 1:
-        return cc_list[0]
-    
-    if len(cc_list) == 0:
-        tz = get_tz()
-        country = tz_to_language.get(tz)
-        return country
-    
+        loc = locale.getlocale()[0] or ''
+    except Exception:
+        return None
+    if '_' not in loc:
+        return None
+    cc = loc.split('_', 1)[1].lower()
+    if cc in country_to_language:
+        return cc
     return None
 
-# ====================
-# HTTP client identity
-# ====================
-
-# Extracted from Tor Browser 14.5.7 (based on Firefox 128 ESR):
 browser_user_agent = 'Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128'
 browser_name = 'Firefox'
 browser_version = '128'
 browser_dfp = 'eJyFkT1MFEEUx/dm/NhsUJcj4PmZDYUxJOgFDSEkhg89UDmQ4AfEZpzdnbubcXdnM7MHh9XaGSs7LCwsKYkVJYUFhSaUlMTExMpYUFyns3u35AiiL9ndt//fe/PmvWf0Gl1lGtQbVmNkGA3fzsOnczMFLX9NbxrmPiw0DWsfXm8axX04mi96OHClg0MyGArqY7F68YQBSNA/pX/eBXmdNEKPOjQqAAsM6DIk+CURspgb0UqasvuxOR/rS99+ty334sOB63/9Uh4buDOudcUqckv7v8VHlCFj/t6U9YySFSKGuu/WBPeJ1SH1pBKt+53ihVnqCC55JbJKbvVw/CKxZ2hk2XXqRYM0SNioNv56be3TmYendM3UCtoCnLs5kb6e543Ts/wV9TyczxxbY30Tc9PlEqKBjHDgEBdhIfCqZGZp6QmyPRK4yKeBjxvsUqI43OMC2fVKhQhUw14FVTyOI3YuganbSmJnU0HgKnJJGNVYX/Iva9hVeRFpRHVBkMddpqf6wvQku5x4GXK4HwoiJeUBssPIOZ6KqqJXO2lFjUNVwQGVPBI8pA7re1R6jIhHfBJEqleXNFCdBhHrTfSKzZFQd1Y5Pg19HLJCIicDcbFwVQOCLuOILhPJuhNyUChtvXBEQh4NCBatqhnpGNaVv+tZ2vkELxOhIlrbQNxmxFGVFkuT0+XDO2ifmJHWXNQas+OxTIZ3LCaKHp8sbync/0+MpKjarKcVk646wyzfFgVead9WZprHZbLFIAkVD9aBvgH0TaBvAX0bFHaAtgticw+YP9TnF9jLNYEew9h8A/V30HwP9Y8wBuswtwFzmzC3Bce2YWztqOdt7uT3n3Dzxh8LG3RL'
-
-# =========
-# HTTP, TLS
-# =========
 
 ua = None
 http_read_size_hint = 1 << 20  # 1 MiB
@@ -581,39 +367,8 @@ def simple_download(request):
                 self.full_url = url
         http_error(FakeRequest(method, url), e)
 
-def get_default_ca_path(name, *hashes):
-    """Get the default CA certificate path."""
-    filename = name.replace(' ', '_') + '.crt'
-    path = f"/usr/share/ca-certificates/mozilla/{filename}"
-    if os.path.isfile(path):
-        return path
-    
-    ssl_cert_dir = os.environ.get('SSL_CERT_DIR')
-    if not ssl_cert_dir and os.path.exists('/etc/ssl/certs'):
-        ssl_cert_dir = '/etc/ssl/certs'
-    
-    if ssl_cert_dir:
-        for hash_val in hashes:
-            path = f"{ssl_cert_dir}/{hash_val}.0"
-            if os.path.isfile(path):
-                try:
-                    rpath = os.readlink(path)
-                    if not rpath.startswith('/'):
-                        rpath = os.path.join(ssl_cert_dir, rpath)
-                    return rpath
-                except:
-                    return path
-    
-    return os.path.join(os.path.dirname(__file__), 'ca.crt')
-
-# ===========================
-# configuration file handling
-# ===========================
-
 global_config = None
 gpg_cmdline = os.environ.get('MBANK_CLI_GPG', 'gpg').split()
-
-# Set GPG_TTY if not set
 if 'GPG_TTY' not in os.environ:
     try:
         os.environ['GPG_TTY'] = os.ttyname(sys.stdin.fileno())
@@ -728,16 +483,25 @@ def config_error(message, config=None):
     message = f"{config_path}: {message}"
     return user_error(message)
 
-# ===========================
-# misc parsing and formatting
-# ===========================
-
 account_number_re = re.compile(r'''
     \d{2}(?:[ ]\d{4}){6}  # Polish IBAN (without the country code)
   | CZ\d{2}(?:[ ]\d{4}){5}  # Czech IBAN
   | SK\d{2}(?:[ ]\d{4}){5}  # Slovak IBAN
   | (?:\d{1,6}-)?\d{2,10}/\d{4}  # Slovak national format
 ''', re.VERBOSE)
+
+mbank_account_known_fields = {
+    'ProductName', 'SubTitle', 'AccountNumber', 'Currency',
+    'Balance', 'AvailableBalance',
+}
+
+external_account_known_fields = {
+    'name', 'productName', 'ProductName', 'externalAccountName', 'accountTypeName',
+    'number', 'accountNumber', 'iban', 'Iban',
+    'balance', 'Balance', 'availableBalance', 'AvailableBalance',
+    'currency', 'Currency', 'bankName', 'providerName', 'provider',
+    'bankAvatarName',
+}
 
 def format_account_number(number):
     """Format an account number."""
@@ -754,36 +518,6 @@ def format_account_number(number):
     
     return number
 
-def format_amount(s, fp=False, plus=False, currency=None):
-    """Format an amount with currency."""
-    if fp:
-        if not currency:
-            internal_error('floating-point number, but no currency')
-        s = format_number('%.2f', s)
-    
-    s = re.sub(r'[\s\xa0]+(?=\d)', '', s)
-    
-    sign_re = r'[+-]?' if plus else r'-?'
-    amount_re = rf'({sign_re}\d+[.,]\d{{2}})'
-    
-    if currency:
-        if not re.match(r'^[A-Z]{3}$', currency):
-            return None
-        currency_re = r''
-    else:
-        currency_re = r'\s+([A-Z]{3})'
-    
-    m = re.match(rf'^{amount_re}{currency_re}$', s)
-    if not m:
-        return None
-    
-    amount = m.group(1)
-    if not currency:
-        currency = m.group(2)
-    
-    amount = amount.replace(',', '.')
-    return f'{amount:>10} {currency}'
-
 def format_money(number, currency, context=None):
     """Format money with proper alignment."""
     match(number, re.compile(r'-?[\d ]+(?:[.,]\d+)?'), context=f"{context}.number" if context else None)
@@ -794,50 +528,35 @@ def format_money(number, currency, context=None):
     currency = str(currency)
     
     try:
-        s = f'{float(number):>10.2f} {currency}'
+        s = f'{float(number):.2f} {currency}'
         return s
     except:
         qnumber = quote(number)
         qcurrency = quote(currency)
         scraping_error(f"{context}: {qnumber}, {qcurrency}")
 
-def format_number(fmt, n):
-    """Format a number with the given format string."""
+def safe_format_money(number, currency, context):
+    if number is None:
+        return ''
+    currency = '' if currency is None else str(currency)
+    if not currency:
+        return ''
+    if not re.fullmatch(r'[A-Z]{3}', currency):
+        warning(f"{context}.currency: invalid value {quote(currency)}")
+        return ''
+    text = str(number).replace('\xa0', ' ')
+    if not re.fullmatch(r'-?[\d ]+(?:[.,]\d+)?', text):
+        warning(f"{context}.number: invalid value {quote(number)}")
+        return ''
     try:
-        return fmt % n
-    except:
-        return None
-
-def wildcards_to_regexp(*wildcards):
-    """Convert shell wildcards to a compiled regex."""
-    patterns = []
-    for wildcard in wildcards:
-        pattern = re.escape(wildcard)
-        pattern = pattern.replace(r'\*', '.*')
-        patterns.append(pattern)
-    
-    re_str = '^(?i:(' + '|'.join(patterns) + '))$'
-    return re.compile(re_str)
-
-# =============
-# date and time
-# =============
+        value = float(text.replace(' ', '').replace(',', '.'))
+    except Exception:
+        warning(f"{context}.number: invalid value {quote(number)}")
+        return ''
+    return f'{value:.2f} {currency}'
 
 def timestamp_to_date(timestamp, time_must_be=None):
-    """Convert ISO timestamp to date string.
-    
-    >>> timestamp_to_date('2006-07-30T14:47:03')
-    '2006-07-30'
-    
-    >>> timestamp_to_date('2006-02-30T14:47:03')
-    None
-    
-    >>> timestamp_to_date('2006-07-30T14:47:03', time_must_be=0)
-    None
-    
-    >>> timestamp_to_date('2006-07-30T00:00:00', time_must_be=0)
-    '2006-07-30'
-    """
+    """Convert ISO timestamp to date string."""
     if not timestamp:
         return None
     
@@ -863,271 +582,7 @@ def timestamp_to_date(timestamp, time_must_be=None):
     except:
         return None
 
-def match_ymd_date(timestamp, context=None, time_must_be=None):
-    """Match a timestamp and extract the date."""
-    result = timestamp_to_date(timestamp, time_must_be=time_must_be)
-    if result:
-        return result
-    return no_match(timestamp, context=context)
-
-def parse_dmy_date(orig_date, context=None):
-    """Parse a day-month-year date.
-    
-    >>> parse_dmy_date('30-07-2006', context='foo')
-    '2006-07-30'
-    
-    >>> parse_dmy_date('30.07.2006', context='foo')
-    '2006-07-30'
-    """
-    date = None
-    if isinstance(orig_date, str):
-        date = _parse_dmy_date(orig_date)
-    
-    if date is None:
-        qdate = quote(orig_date)
-        scraping_error(f"{context}: {qdate} is not a valid day-month-year date")
-    
-    return date
-
-def _parse_dmy_date(date):
-    """Internal function to parse day-month-year date."""
-    m = re.match(r'^(\d{2})([.-])(\d{2})\2(\d{4})$', date)
-    if not m:
-        return None
-    
-    d, _, m_val, y = m.groups()
-    date = f"{y}-{m_val}-{d}"
-    
-    try:
-        dt = datetime.strptime(date, '%Y-%m-%d')
-        pdate = dt.strftime('%Y-%m-%d')
-        if date != pdate:
-            return None
-        return date
-    except:
-        return None
-
-def shift_date(date, offset):
-    """Shift a date by a number of days."""
-    new_date = _shift_date(date, offset)
-    if new_date is None:
-        internal_error(f"shift_date(): could not shift {date} by {offset} days")
-    return new_date
-
-def _shift_date(date, offset):
-    """Internal function to shift a date."""
-    try:
-        dt = datetime.strptime(date, '%Y-%m-%d')
-        new_dt = dt + timedelta(days=offset)
-        new_date = new_dt.strftime('%Y-%m-%d')
-        if re.match(r'^\d{4}-\d{2}-\d{2}$', new_date):
-            return new_date
-    except:
-        pass
-    return None
-
-def parse_http_date(s, context=None):
-    """Parse HTTP date header to datetime object."""
-    match(s, re.compile(r'.+'), context=context)
-    
-    from email.utils import parsedate_to_datetime
-    try:
-        dt = parsedate_to_datetime(s)
-        return dt
-    except:
-        return no_match(s, context=context)
-
-def local_date(dt):
-    """Convert datetime to local date string."""
-    if not isinstance(dt, datetime):
-        internal_error('local_date(): invalid argument')
-    
-    # Convert to Europe/Warsaw timezone
-    import zoneinfo
-    try:
-        tz = zoneinfo.ZoneInfo('Europe/Warsaw')
-        local_dt = dt.astimezone(tz)
-        
-        # Check if offset is 0 (should never be for Poland)
-        if local_dt.utcoffset().total_seconds() == 0:
-            internal_error("local_date(): could not set TZ=Europe/Warsaw")
-        
-        return local_dt.strftime('%Y-%m-%d')
-    except:
-        # Fallback without zoneinfo
-        return dt.strftime('%Y-%m-%d')
-
-def local_midnight_to_utc(date):
-    """Convert local midnight to UTC timestamp.
-    
-    >>> local_midnight_to_utc('2006-07-30')
-    '2006-07-29T22:00:00.000Z'
-    
-    >>> local_midnight_to_utc('2009-12-08')
-    '2009-12-07T23:00:00.000Z'
-    """
-    import zoneinfo
-    try:
-        tz = zoneinfo.ZoneInfo('Europe/Warsaw')
-    except:
-        # Fallback
-        tz = timezone(timedelta(hours=1))
-    
-    dt = datetime.strptime(date, '%Y-%m-%d')
-    local_dt = dt.replace(tzinfo=tz)
-    utc_dt = local_dt.astimezone(timezone.utc)
-    
-    datetime_str = utc_dt.strftime('%Y-%m-%dT%H:%M:%S')
-    
-    # Check if time is all zeros (shouldn't be for Poland)
-    if re.match(r'T[0:]+$', datetime_str.split('T')[1]):
-        internal_error("local_midnight_to_utc(): could not set TZ=Europe/Warsaw")
-    
-    return f"{datetime_str}.000Z"
-
-def js_time():
-    """Get JavaScript-style timestamp (milliseconds since epoch).
-    
-    Like Tor Browser, we support only 100ms accuracy.
-    
-    >>> js_time()
-    1570127042900
-    """
-    t = time.time()
-    # Round to 100ms accuracy
-    t = int(t * 10) * 100
-    return t
-
-# ============
-# HTML parsing
-# ============
-
-class HTMLElement:
-    """Simple HTML element wrapper."""
-    def __init__(self, tag, attrs, parent=None):
-        self.tag = tag
-        self.attrs = attrs or {}
-        self.parent = parent
-        self.children = []
-        self.text = ''
-    
-    def attr(self, name):
-        """Get an attribute value."""
-        return self.attrs.get(name)
-    
-    def look_down(self, predicate):
-        """Find elements matching a predicate."""
-        results = []
-        if predicate(self):
-            results.append(self)
-        for child in self.children:
-            results.extend(child.look_down(predicate))
-        return results
-
-class SimpleHTMLParser(HTMLParser):
-    """Simple HTML parser to build element tree."""
-    def __init__(self):
-        super().__init__()
-        self.root = None
-        self.current = None
-        self.stack = []
-    
-    def handle_starttag(self, tag, attrs):
-        elem = HTMLElement(tag, dict(attrs), self.current)
-        if self.root is None:
-            self.root = elem
-        if self.current:
-            self.current.children.append(elem)
-        self.stack.append(self.current)
-        self.current = elem
-    
-    def handle_endtag(self, tag):
-        if self.stack:
-            self.current = self.stack.pop()
-    
-    def handle_data(self, data):
-        if self.current:
-            self.current.text += data
-
-def html_new(s):
-    """Create HTML element tree from string."""
-    parser = SimpleHTMLParser()
-    parser.feed(s)
-    return parser.root
-
-def html_class_regexp(class_name):
-    """Create regex for matching HTML class."""
-    return re.compile(rf'(?:^|\s){re.escape(class_name)}(?:\s|$)')
-
-def has_html_class(element, class_name):
-    """Check if element has a specific class."""
-    element_class = element.attr('class') or ''
-    return bool(html_class_regexp(class_name).search(element_class))
-
-def html_find(root_elt, tag=None, class_=None, id=None, name=None, type=None, n=None, context=None):
-    """Find HTML elements matching criteria.
-    
-    In scalar context (n=1), returns single element.
-    """
-    attrs = {}
-    if id is not None:
-        attrs['id'] = id
-    if name is not None:
-        attrs['name'] = name
-    if type is not None:
-        attrs['type'] = type
-    
-    classes = []
-    if class_:
-        if isinstance(class_, list):
-            classes = class_
-        elif isinstance(class_, str):
-            classes = class_.split()
-        else:
-            internal_error('html_find(): invalid argument', 1)
-    
-    def predicate(elt):
-        # Check classes
-        for cls in classes:
-            if not has_html_class(elt, cls):
-                return False
-        
-        # Check tag
-        if tag and elt.tag != tag:
-            return False
-        
-        # Check attributes
-        for aname, avalue in attrs.items():
-            if (elt.attr(aname) or '') != avalue:
-                return False
-        
-        return True
-    
-    result = root_elt.look_down(predicate)
-    
-    if n is not None:
-        if context is None:
-            internal_error('html_find(): missing keyword argument: context', 1)
-        if len(result) != n:
-            scraping_error(f"{context}: expected {n} element(s), got {len(result)}")
-    
-    if n == 1:
-        return result[0] if result else None
-    return result
-
-# ====
-# JSON
-# ====
-
-def encode_json(obj):
-    """Encode object to JSON."""
-    return json.dumps(obj, ensure_ascii=True)
-
 def decode_json(json_str, context=None, type=None):
-    """Decode JSON with type checking.
-    
-    type can be {} for object or [] for array.
-    """
     if type is None:
         type = {}
     
@@ -1137,17 +592,6 @@ def decode_json(json_str, context=None, type=None):
         scraping_error(f"{context}: {e}")
     
     return check_type(obj, type, context=context)
-
-def json_content(obj):
-    """Return tuple for setting JSON content in request."""
-    return (
-        encode_json(obj),
-        'application/json; charset=UTF-8',
-    )
-
-# =====
-# UUIDs
-# =====
 
 uuid_template = 'XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX'
 
@@ -1172,29 +616,9 @@ def match_uuid(s, context=None):
         return result
     return no_match(s, context=context)
 
-# ==================
-# terminal functions
-# ==================
-
-def term_new():
-    """Create a new terminal/readline interface."""
-    # Simple stub - in real implementation would use readline
-    class SimpleTerm:
-        def readline(self, prompt, default=''):
-            try:
-                result = input(prompt)
-                return result if result else default
-            except EOFError:
-                return None
-    return SimpleTerm()
-
 def term_readpasswd(prompt='Password: '):
     """Read password from terminal."""
     return getpass.getpass(prompt)
-
-# ========================
-# Main program and helpers
-# ========================
 
 VERSION = '20250101'  # Version placeholder
 mbank_host = None
@@ -1204,12 +628,6 @@ csite_url = None
 
 opt_config = None
 opt_cookie_jar = None
-opt_start_date = None
-opt_end_date = None
-opt_with_id = False
-opt_export = None
-opt_multi = False
-opt_all = False
 
 header_xhr = {
     'X-Requested-With': 'XMLHttpRequest',
@@ -1229,26 +647,11 @@ Options:
   --debug-interactive     Enable interactive debugging
   --config FILE           Configuration file path
   --cookie-jar FILE       Cookie jar file path
-  --from DATE             Start date (YYYY-MM-DD)
-  --to DATE               End date (YYYY-MM-DD)
-  --with-id               Show transaction IDs
-  --export FORMAT         Export format (CSV, HTML, PDF)
-  -M, --multiple-accounts Show account names
-  -A, --all-accounts      Select all accounts
   -h, --help              Show this help
   --version               Show version
 
 Commands:
   list                    List accounts
-  history                 Show transaction history
-  history2019             Show transaction history (2019+ API)
-  future                  Show future transactions
-  blocked                 Show blocked amounts
-  deposits                Show deposits
-  cards                   Show cards
-  funds                   Show funds
-  pension                 Show pension
-  notices                 Show notices
   logout                  Logout
   register-device         Register device
   activate-profile        Activate profile
@@ -1263,26 +666,6 @@ def show_version():
     print(f"+ urllib.request (built-in)")
     print(f"+ http.cookiejar (built-in)")
     sys.exit(0)
-
-def check_user_date(option, date):
-    """Validate a user-provided date."""
-    if not re.match(r'^\d{4}-\d{2}-\d{2}$', date):
-        user_error(f"--{option} date not in the YYYY-MM-DD format: {date}")
-    
-    try:
-        datetime.strptime(date, '%Y-%m-%d')
-    except ValueError:
-        user_error(f"invalid --{option} date: {date}")
-    
-    return date
-
-def check_export_format(option, format):
-    """Validate export format."""
-    format = format.upper()
-    valid_formats = ['CSV', 'HTML', 'PDF']
-    if format not in valid_formats:
-        user_error(f"--{option} format not in {', '.join(valid_formats)}")
-    return format
 
 def expand_tilde(path):
     """Expand ~ in file paths."""
@@ -1366,8 +749,7 @@ def initialize():
 def parse_args():
     """Parse command-line arguments."""
     global opt_verbose, opt_debug_dir, opt_debug_interactive
-    global opt_config, opt_cookie_jar, opt_start_date, opt_end_date
-    global opt_with_id, opt_export, opt_multi, opt_all
+    global opt_config, opt_cookie_jar
     
     parser = argparse.ArgumentParser(
         prog='mbank-cli',
@@ -1380,12 +762,6 @@ def parse_args():
     parser.add_argument('--debug-interactive', action='store_true', help='Enable interactive debugging')
     parser.add_argument('--config', metavar='FILE', help='Configuration file')
     parser.add_argument('--cookie-jar', metavar='FILE', help='Cookie jar file')
-    parser.add_argument('--from', dest='from_date', metavar='DATE', help='Start date (YYYY-MM-DD)')
-    parser.add_argument('--to', dest='to_date', metavar='DATE', help='End date (YYYY-MM-DD)')
-    parser.add_argument('--with-id', action='store_true', help='Show transaction IDs')
-    parser.add_argument('--export', metavar='FORMAT', help='Export format (CSV, HTML, PDF)')
-    parser.add_argument('-M', '--multiple-accounts', action='store_true', help='Show account names')
-    parser.add_argument('-A', '--all-accounts', action='store_true', help='Select all accounts')
     parser.add_argument('-h', '--help', action='store_true', help='Show help')
     parser.add_argument('--version', action='store_true', help='Show version')
     parser.add_argument('command', nargs='?', help='Command to execute')
@@ -1406,9 +782,6 @@ def parse_args():
     opt_debug_interactive = args.debug_interactive
     opt_config = args.config or os.path.join(xdg_config_home(), 'mbank-cli', 'config')
     opt_cookie_jar = args.cookie_jar
-    opt_with_id = args.with_id
-    opt_multi = args.multiple_accounts
-    opt_all = args.all_accounts
     
     if args.debug:
         if args.debug.startswith('-'):
@@ -1416,21 +789,10 @@ def parse_args():
         makedirs(args.debug)
         opt_debug_dir = args.debug
     
-    if args.from_date:
-        opt_start_date = check_user_date('from', args.from_date)
-    
-    if args.to_date:
-        opt_end_date = check_user_date('to', args.to_date)
-    
-    if args.export:
-        opt_export = check_export_format('export', args.export)
-        if sys.stdout.isatty():
-            user_error('export data cannot be written to a terminal; please redirect stdout to a file')
-    
     command = args.command or 'list'
     return command, args.args
 
-def _extract_login_profiles(html):
+def _extract_login_profiles(page_content):
     """Extract available profiles from the post-login page."""
     def extract_js_object_assignment(content, var_name):
         marker_pos = content.find(var_name)
@@ -1479,10 +841,9 @@ def _extract_login_profiles(html):
         'personal': [],
         'business': [],
     }
-    
-    scripts = html_find(html, tag='script', n=None)
-    for e_script in scripts:
-        content = e_script.text or ''
+
+    for m in re.finditer(r'<script\b[^>]*>(.*?)</script>', page_content, re.IGNORECASE | re.DOTALL):
+        content = m.group(1)
         json_payload = extract_js_object_assignment(content, 'Ebre.Venezia.ProfileData')
         if not json_payload:
             continue
@@ -1649,22 +1010,29 @@ def do_login(probe=False, register_device=None):
     
     # Extract tab ID and CSRF token
     tabid = get_tabid()
-    html = html_new(doc['content'])
-    
+    content = doc['content']
+
     # Check for technical break
-    tech_break = html_find(html, tag='header', class_='tech-break', n=None)
-    if tech_break:
+    if re.search(r'<header\b[^>]*class=["\'][^"\']*\btech-break\b[^"\']*["\']', content, re.IGNORECASE):
         server_error('service is temporarily unavailable')
-    
+
     # Get CSRF token
-    e_meta = html_find(html, tag='meta', name='__AjaxRequestVerificationToken', n=1, context='login.csrf-token')
-    if not e_meta:
-        scraping_error('login.csrf-token: meta tag not found')
-    
-    csrf_token = e_meta.attr('content')
+    csrf_token = None
+    for meta in re.finditer(r'<meta\b[^>]*>', content, re.IGNORECASE):
+        tag = meta.group(0)
+        name_m = re.search(r'name=["\']([^"\']+)["\']', tag, re.IGNORECASE)
+        if not name_m:
+            continue
+        if name_m.group(1) != '__AjaxRequestVerificationToken':
+            continue
+        content_m = re.search(r'content=["\']([^"\']+)["\']', tag, re.IGNORECASE)
+        if content_m:
+            csrf_token = content_m.group(1)
+            break
+
     if not csrf_token or len(csrf_token) < 20:
         scraping_error(f'login.csrf-token: invalid token')
-    profiles = _extract_login_profiles(html)
+    profiles = _extract_login_profiles(content)
     
     debug('logged in')
     
@@ -1845,39 +1213,12 @@ def do_2fa(device_to_add=None):
     return None
 
 def _ask_for_sms_password(date, n, try_num):
-    """Ask for SMS password.
-    
-    When try_num=0, performs a pre-check to validate smsinbox configuration
-    without actually asking for a password.
-    """
-    smsinbox = get_config_var('smsinbox')
-    if smsinbox:
-        if try_num == 0:
-            # Pre-check mode: just validate configuration
-            return None
-        # Use SMS inbox to get password
-        import subprocess
-        try:
-            result = subprocess.run(
-                ['sh', '-c', f"{smsinbox} {date} {n}"],
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            password = result.stdout.strip()
-            if password:
-                return password
-        except:
-            pass
-    elif try_num == 0:
-        # Pre-check mode with no smsinbox: nothing to validate
+    """Ask for SMS password from terminal."""
+    if try_num == 0:
         return None
-    
-    # Manual input
     if try_num > 1:
         print(f"(try #{try_num})", file=sys.stderr)
-    password = input(f"SMS password from {date} (operation #{n}): ")
-    return password
+    return input(f"SMS password from {date} (operation #{n}): ")
 
 def clear_temp_cookies():
     """Clear temporary cookies."""
@@ -1936,14 +1277,68 @@ def get_tabid():
         scraping_error('login.tabid')
     return match_uuid(tabid, context='login.tabid')
 
-def parse_offline_accounts(json_content):
-    """Parse offline accounts from JSON."""
-    def first_defined(*values):
-        for value in values:
-            if value is not None:
-                return value
+def normalize_mbank_account(raw_account):
+    if not isinstance(raw_account, dict):
+        scraping_error('list.mbank.account: not an object')
+
+    name = match(raw_account.get('ProductName', ''), re.compile(r'.+'), context='list.product-name')
+    subtitle = raw_account.get('SubTitle', '')
+    if subtitle:
+        name += f" - {subtitle}"
+
+    number = match(raw_account.get('AccountNumber', ''), account_number_re, context='list.account-number')
+    return {
+        'name': name,
+        'number': number,
+        'balance': raw_account.get('Balance'),
+        'available': raw_account.get('AvailableBalance'),
+        'currency': first_defined(raw_account.get('Currency'), ''),
+        'source': 'mbank',
+    }
+
+def normalize_external_account(raw_account):
+    if not isinstance(raw_account, dict):
         return None
 
+    name = first_defined(
+        raw_account.get('name'),
+        raw_account.get('productName'),
+        raw_account.get('ProductName'),
+        raw_account.get('externalAccountName'),
+        raw_account.get('accountTypeName'),
+    )
+    number = first_defined(
+        raw_account.get('number'),
+        raw_account.get('accountNumber'),
+        raw_account.get('iban'),
+        raw_account.get('Iban'),
+    )
+    if not name or not number:
+        return None
+
+    source = first_defined(
+        raw_account.get('bankName'),
+        raw_account.get('providerName'),
+        raw_account.get('provider'),
+        'external',
+    )
+    currency = first_defined(raw_account.get('currency'), raw_account.get('Currency'), '')
+    currency = '' if currency is None else str(currency)
+    if currency and not re.fullmatch(r'[A-Z]{3}', currency):
+        warning(f"list.external.currency: invalid value {quote(currency)}")
+        currency = ''
+
+    return {
+        'name': str(name),
+        'number': format_account_number(str(number)),
+        'balance': first_defined(raw_account.get('balance'), raw_account.get('Balance')),
+        'available': first_defined(raw_account.get('availableBalance'), raw_account.get('AvailableBalance')),
+        'currency': currency,
+        'source': str(source) if source else 'external',
+    }
+
+def parse_offline_accounts(json_content):
+    """Parse offline accounts from JSON."""
     try:
         data = json.loads(json_content)
     except:
@@ -1962,31 +1357,9 @@ def parse_offline_accounts(json_content):
     
     accounts = []
     for a in account_list:
-        if not isinstance(a, dict):
-            continue
-        
-        name = first_defined(
-            a.get('name'),
-            a.get('productName'),
-            a.get('ProductName'),
-            a.get('externalAccountName'),
-            a.get('accountTypeName'),
-        )
-        number = first_defined(a.get('number'), a.get('accountNumber'), a.get('iban'), a.get('Iban'))
-        
-        if not name or not number:
-            continue
-        
-        bank = first_defined(a.get('bankName'), a.get('providerName'), a.get('provider'), '')
-        
-        accounts.append({
-            'name': name,
-            'number': format_account_number(number),
-            'balance': first_defined(a.get('balance'), a.get('Balance')),
-            'currency': first_defined(a.get('currency'), a.get('Currency'), ''),
-            'available': first_defined(a.get('availableBalance'), a.get('AvailableBalance')),
-            'source': bank if bank else 'external',
-        })
+        normalized = normalize_external_account(a)
+        if normalized is not None:
+            accounts.append(normalized)
     
     return accounts
 
@@ -2040,29 +1413,22 @@ def do_list(login=None, quiet=False):
     
     doc = download(request)
     json_data = decode_json(doc['content'], context='list.json')
-    accounts = json_data.get('accountDetailsList', [])
+    accounts = check_type(json_data.get('accountDetailsList'), [], context='list.accounts')
     
     result = []
-    for account in accounts:
-        name = match(account.get('ProductName', ''), re.compile(r'.+'), context='list.product-name')
-        subtitle = account.get('SubTitle', '')
-        if subtitle:
-            name += f" - {subtitle}"
-        
-        number = match(account.get('AccountNumber', ''), account_number_re, context='list.account-number')
-        
+    for raw_account in accounts:
+        account = normalize_mbank_account(raw_account)
         result.append({
-            'name': name,
-            'number': number,
-            'source': 'mbank',
+            'name': account['name'],
+            'number': account['number'],
+            'source': account['source'],
         })
         
         if not quiet:
-            currency = account.get('Currency')
-            balance = format_money(account.get('Balance'), currency, context='list.balance')
-            available = format_money(account.get('AvailableBalance'), currency, context='list.available')
-            display_name = unicode_display(name)
-            print(f"{display_name}\t{number}\t{balance}\t{available}\tmbank")
+            balance = safe_format_money(account.get('balance'), account.get('currency'), context='list.balance')
+            available = safe_format_money(account.get('available'), account.get('currency'), context='list.available')
+            display_name = unicode_display(account['name'])
+            print(f"{display_name};{account['number']};{balance};{available};{account['source']}")
     
     # Add offline accounts
     offline_accounts = fetch_offline_accounts(login)
@@ -2070,25 +1436,11 @@ def do_list(login=None, quiet=False):
         result.append({'name': a['name'], 'number': a['number'], 'source': a['source']})
         
         if not quiet:
-            cur = a.get('currency', '')
-            bal = ''
-            avl = ''
-            
-            if a.get('balance') is not None and cur:
-                try:
-                    bal = format_money(a['balance'], cur, context='list.offline.balance')
-                except Exception:
-                    pass
-            
-            if a.get('available') is not None and cur:
-                try:
-                    avl = format_money(a['available'], cur, context='list.offline.available')
-                except Exception:
-                    pass
-            
+            bal = safe_format_money(a.get('balance'), a.get('currency'), context='list.offline.balance')
+            avl = safe_format_money(a.get('available'), a.get('currency'), context='list.offline.available')
             display_name = unicode_display(a['name'])
             display_source = unicode_display(a['source'])
-            print(f"{display_name}\t{a['number']}\t{bal}\t{avl}\t{display_source}")
+            print(f"{display_name};{a['number']};{bal};{avl};{display_source}")
     
     return result
 
@@ -2190,7 +1542,6 @@ def _cookiejar_sanity_check_for_register_device():
     if uuid not in content:
         user_error(f"{cookie_jar_path}: unwritable cookie file")
 
-# Command implementations
 def cmd_register_device(**kwargs):
     """Register current device as trusted."""
     args = kwargs.get('args') or []
@@ -2210,8 +1561,6 @@ def cmd_configure(**kwargs):
     """Interactive configuration wizard."""
     config_path = kwargs.get('config_path')
     cookie_jar_path = kwargs.get('cookie_jar_path')
-    
-    term = term_new()
     
     # Check if config exists and ask to overwrite
     if config_path and os.path.exists(config_path):
@@ -2241,50 +1590,6 @@ def cmd_configure(**kwargs):
     while not password:
         password = term_readpasswd('Password: ')
     
-    # Ask about GPG encryption
-    use_gpg = ''
-    while use_gpg not in ['y', 'Y', 'n', 'N']:
-        use_gpg = input('Encrypt password with GnuPG (y/n)? ') or 'y'
-    use_gpg = use_gpg in ['y', 'Y']
-    
-    encrypted_password = None
-    if use_gpg:
-        import subprocess
-        password_line = _make_config_line('Password', password)
-        try:
-            # Check for secret keys
-            result = subprocess.run(
-                gpg_cmdline + ['--batch', '--list-secret-keys'],
-                capture_output=True,
-                text=True
-            )
-            if not result.stdout:
-                print("No secret keys in the GnuPG keyring.", file=sys.stderr)
-                print(f"Use \"{' '.join(gpg_cmdline)} --gen-key\" to generate a key pair.", file=sys.stderr)
-                retry = input('GnuPG encryption failed. Store password unencrypted (y/n)? ')
-                if retry not in ['y', 'Y']:
-                    user_error('Configuration cancelled')
-            else:
-                # Encrypt the password
-                result = subprocess.run(
-                    gpg_cmdline + ['--armor', '--encrypt', '--default-recipient-self'],
-                    input=password_line,
-                    capture_output=True,
-                    text=True
-                )
-                if result.returncode == 0:
-                    encrypted_password = result.stdout
-                else:
-                    print(f"GnuPG encryption failed: {result.stderr}", file=sys.stderr)
-                    retry = input('Store password unencrypted (y/n)? ')
-                    if retry not in ['y', 'Y']:
-                        user_error('Configuration cancelled')
-        except Exception as e:
-            print(f"GnuPG error: {e}", file=sys.stderr)
-            retry = input('Store password unencrypted (y/n)? ')
-            if retry not in ['y', 'Y']:
-                user_error('Configuration cancelled')
-    
     # Get cookie jar path
     sanitized_login = re.sub(r'\W', '_', login)
     xdg_data = xdg_data_home()
@@ -2313,11 +1618,7 @@ def cmd_configure(**kwargs):
             fh.write(_make_config_line('CookieJar', cookie_jar_path))
             fh.write(_make_config_line('Country', cc.upper()))
             fh.write(_make_config_line('Login', login))
-            if encrypted_password:
-                fh.write("# Password (encrypted):\n")
-                fh.write(encrypted_password)
-            else:
-                fh.write(_make_config_line('Password', password))
+            fh.write(_make_config_line('Password', password))
     except OSError as e:
         os_error(f"{config_new}: {e}")
     
@@ -2348,33 +1649,8 @@ def cmd_list(**kwargs):
     """List accounts."""
     login_info = kwargs.get('login')
     if not login_info:
-        # If no login provided, this is being called without login requirement
-        # This shouldn't happen in normal flow, but handle it gracefully
-        print("=" * 60)
-        print("Error: Login required")
-        print("=" * 60)
-        print()
-        print("The list command requires authentication.")
-        print("Make sure you have a valid configuration file.")
-        print()
-        sys.exit(1)
-    
-    # Call the actual list implementation
+        user_error('list: login required')
     do_list(login=login_info, quiet=False)
-
-def cmd_history(**kwargs):
-    """Show transaction history."""
-    print("The 'history' command requires full implementation of:")
-    print("  • History API integration")
-    print("  • CSV parsing and formatting")
-    print("  • Date range handling")
-    print()
-    print("This is a complex command (~500 lines of code).")
-    print("For now, please use the original Perl version:")
-    print("  ./mbank-cli history ACCOUNT")
-    print()
-    print("Or try the newer history2019 API (if implemented)")
-    sys.exit(1)
 
 def cmd_activate_profile(**kwargs):
     """Activate personal/business profile."""
@@ -2430,41 +1706,21 @@ def cmd_activate_profile(**kwargs):
     # Response is not valid JSON despite content-type in Perl implementation.
     do_lazy_logout(login=login_info)
 
-def cmd_not_implemented(command_name):
-    """Generic not implemented handler."""
-    def handler(**kwargs):
-        print(f"The '{command_name}' command is not yet implemented in the Python port.")
-        print(f"Please use the original Perl version: ./mbank-cli {command_name}")
-        sys.exit(1)
-    return handler
-
 def main():
     """Main entry point."""
     command_name, args = parse_args()
     debug(f"selected command: {command_name}")
     
     commands = {
-        'debug-noop': {},
-        'debug-https-get': {'args': True},
-        'debug-sms-password': {'args': True},
-        'list': {},
-        'history': {'accounts': True, 'dates': True, 'ids': True, 'export': True},
-        'history2019': {'accounts': True, 'dates': True, 'ids': True, 'export': True},
-        'future': {'accounts': True, 'dates': True},
-        'blocked': {'accounts': True},
-        'deposits': {},
-        'cards': {},
-        'funds': {},
-        'pension': {},
-        'notices': {},
+        'list': {'login': True},
         'logout': {'login': False},
         'register-device': {'login': False, 'args': True},
-        'activate-profile': {'args': True},
+        'activate-profile': {'login': True, 'args': True},
         'configure': {'login': False, 'config': False},
     }
     
     command_info = commands.get(command_name)
-    if command_info is None:  # FIX: Check for None, not falsy (empty dict {} is valid)
+    if command_info is None:
         user_error(f"{command_name}: invalid command")
     
     # Get command function
@@ -2472,31 +1728,16 @@ def main():
     command_func = globals().get(f'cmd_{command_func_name}')
     
     if not command_func:
-        command_func = cmd_not_implemented(command_name)
+        user_error(f"{command_name}: invalid command")
     
     need_login = command_info.get('login', True)
     cmd_options = {}
-    
-    if command_name.startswith('debug-'):
-        need_login = False
-    
+
     if command_info.get('config', True):
         initialize()
     else:
         cmd_options['config_path'] = opt_config
         cmd_options['cookie_jar_path'] = opt_cookie_jar
-    
-    if command_info.get('todo'):
-        user_error(f"{command_name}: command not implemented")
-    
-    if command_info.get('accounts'):
-        selection = args if args else []
-        if opt_all:
-            selection = ['*']
-        if len(selection) < 1:
-            user_error(f"{command_name}: no account selected")
-        cmd_options['selection'] = selection
-        cmd_options['display_name'] = opt_all or opt_multi
     
     if command_info.get('args'):
         cmd_options['args'] = args
@@ -2504,21 +1745,6 @@ def main():
     if need_login:
         login_info = do_login()
         cmd_options['login'] = login_info
-        if command_info.get('accounts'):
-            account_info = do_list(login=login_info, quiet=True)
-            cmd_options['accounts'] = account_info
-    
-    if command_info.get('dates'):
-        cmd_options['start_date'] = opt_start_date
-        cmd_options['end_date'] = opt_end_date
-    
-    if command_info.get('ids'):
-        cmd_options['display_id'] = opt_with_id
-    
-    if command_info.get('export'):
-        cmd_options['export'] = opt_export
-    
-    # Call the command
     command_func(**cmd_options)
 
 if __name__ == '__main__':
@@ -2547,5 +1773,3 @@ if __name__ == '__main__':
                     ua.cookie_jar.save(ignore_discard=True, ignore_expires=True)
             except:
                 pass
-
-# vim:ts=4 sts=4 sw=4 et
