@@ -83,7 +83,10 @@ def http_error(request, response):
     """Handle HTTP errors."""
     message = f'HTTP error {response.status} on <{request.method} {request.full_url}>'
     
-    if response.status == 500:
+    # Only read error content for client-side errors (like SSL failures)
+    # This matches the Perl version which checks for "Client-Warning: Internal response"
+    client_warning = response.headers.get('Client-Warning', '')
+    if response.status == 500 and client_warning == 'Internal response':
         try:
             extra = response.read().decode('utf-8', errors='replace')
             extra = extra.rstrip('\n')
