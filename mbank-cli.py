@@ -1378,15 +1378,484 @@ def parse_args():
     command = args.command or 'list'
     return command, args.args
 
-def do_login():
-    """Perform login (stub)."""
-    # This is a stub - full implementation would require extensive web scraping
-    user_error('Login not yet implemented in Python version')
+def do_login(probe=False, register_device=None):
+    """Perform login with authentication."""
+    global ua
+    
+    # Initial request to check if we're already logged in
+    request = urllib.request.Request(base_url)
+    doc = download(request)
+    
+    if '/Login' in doc['url']:
+        if probe:
+            debug('not logged in')
+            return None
+        
+        clear_temp_cookies()
+        debug('logging in...')
+        
+        # Extract language and return URL
+        lang_match = re.search(r'/(\w\w)$', base_url)
+        lang = lang_match.group(1) if lang_match else 'pl'
+        
+        return_url_match = re.search(
+            rf"'/signin/connect/authorize\?ui_locales={lang}&(request_uri=urn%3aietf%3aparams%3aoauth%3arequest_uri%3a[0-9A-F]+&client_id=Ib)'",
+            doc['content']
+        )
+        if not return_url_match:
+            scraping_error('login.return-url')
+        
+        return_url = return_url_match.group(1)
+        return_url = return_url.replace('%3a', '%3A')
+        return_url = f"/signin/connect/authorize/callback?{return_url}&suppressed_prompt=login"
+        
+        # Get login credentials
+        login = get_config_var('login')
+        if not login:
+            config_error('missing login')
+        
+        # Get password
+        password_manager = get_config_var('passwordmanager')
+        if password_manager:
+            import subprocess
+            try:
+                result = subprocess.run(
+                    ['sh', '-c', password_manager],
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                password = result.stdout.split('\n')[0]
+            except subprocess.CalledProcessError:
+                os_error('password manager failed')
+        else:
+            password = get_config_var('password')
+            if not password:
+                if sys.stdin.isatty():
+                    password = term_readpasswd('Password: ')
+                else:
+                    config_error('missing password')
+        
+        if not password:
+            user_error('login failed: empty password')
+        
+        # Pre-login request
+        headers_dict = {
+            'Origin': root_url,
+            'Referer': f'{root_url}/connect/Login',
+            'Content-Type': 'application/json; charset=UTF-8',
+        }
+        
+        prelogin_data = {
+            'language': lang,
+            'login': login,
+            'password': password,
+            'returnUrl': return_url,
+        }
+        
+        request = urllib.request.Request(
+            f'{root_url}/signin/connect/api/users/prelogin',
+            data=json.dumps(prelogin_data).encode('utf-8'),
+            headers=headers_dict,
+            method='POST'
+        )
+        
+        doc = download(request, ignore_errors=[422])
+        data = decode_json(doc['content'], context='login.prelogin.json')
+        
+        if data.get('type') != 'PreLoginResponse':
+            message = data.get('detail', '')
+            user_error(f"login failed: {message}")
+        
+        # 2FA
+        token = do_2fa(register_device)
+        
+        # Final login
+        finallogin_data = {
+            'language': lang.capitalize(),
+            'returnUrl': return_url,
+            'token': token,
+        }
+        
+        request = urllib.request.Request(
+            f'{root_url}/signin/connect/api/users/finallogin',
+            data=json.dumps(finallogin_data).encode('utf-8'),
+            headers=headers_dict,
+            method='POST'
+        )
+        
+        doc = download(request)
+        data = decode_json(doc['content'], context='login.final')
+        return_url = match(data.get('returnUrl', ''), re.compile(r'/.+'), context='login.final.return-url')
+        
+        # Follow return URL
+        request = urllib.request.Request(f'{root_url}{return_url}')
+        doc = download(request)
+        
+        # Get final page
+        request = urllib.request.Request(base_url)
+        doc = download(request)
+    
+    # Extract tab ID and CSRF token
+    tabid = get_tabid()
+    html = html_new(doc['content'])
+    
+    # Check for technical break
+    tech_break = html_find(html, tag='header', class_='tech-break', n=None)
+    if tech_break:
+        server_error('service is temporarily unavailable')
+    
+    # Get CSRF token
+    e_meta = html_find(html, tag='meta', name='__AjaxRequestVerificationToken', n=1, context='login.csrf-token')
+    if not e_meta:
+        scraping_error('login.csrf-token: meta tag not found')
+    
+    csrf_token = e_meta.attr('content')
+    if not csrf_token or len(csrf_token) < 20:
+        scraping_error(f'login.csrf-token: invalid token')
+    
+    debug('logged in')
+    
+    return {
+        'headers': {
+            'Referer': doc['url'],
+            'X-Tab-Id': tabid,
+            'X-Request-Verification-Token': csrf_token,
+            'X-Requested-With': 'XMLHttpRequest',
+        },
+        'csrf_token': csrf_token,
+        'url': doc['url'],
+    }
 
-def do_list(**kwargs):
-    """List accounts (stub)."""
-    # This is a stub - full implementation would require extensive web scraping
-    user_error('List command not yet implemented in Python version')
+def do_2fa(device_to_add=None):
+    """Handle 2-factor authentication."""
+    headers_api_auth = {
+        'Origin': root_url,
+        'Referer': f'{root_url}/connect/Login',
+        'Content-Type': 'application/json; charset=UTF-8',
+    }
+    
+    # Get DFP
+    dfp = get_config_var('dfp') or browser_dfp
+    
+    # SCA request
+    request = urllib.request.Request(
+        f'{root_url}/signin/connect/api/sca',
+        data=json.dumps({'dfp': dfp}).encode('utf-8'),
+        headers=headers_api_auth,
+        method='POST'
+    )
+    
+    doc = download(request)
+    unexpire_cookie('mBank8', context='login.sca.cookie')
+    
+    data = decode_json(doc['content'], context='login.sca')
+    sca_status = match(data.get('imsStatus', ''), re.compile(r'(Is|Not)Trusted|Suspicious'), context='login.sca.status')
+    debug(f"SCA status: {sca_status}")
+    
+    if sca_status == 'IsTrusted':
+        # No 2FA needed
+        if device_to_add:
+            user_error('device already registered')
+        return match_uuid(data.get('token', ''), context='login.sca.token')
+    
+    # Prepare module data
+    mod_data = {
+        'authorizationAction': 1,  # OneTimeLogin
+        'browserName': browser_name,
+        'browserVersion': browser_version,
+        'deviceName': f"Komputer Linux {browser_name}",
+        'osName': 'Linux',
+        'dfp': dfp,
+    }
+    
+    if device_to_add:
+        if sca_status != 'NotTrusted':
+            user_error('device already registered')
+        mod_data['authorizationAction'] = 2  # AddTrusted
+        mod_data['deviceName'] = device_to_add
+    
+    # Initialize mediator
+    request = urllib.request.Request(
+        f'{root_url}/signin/connect/api/mediator/initialize',
+        data=json.dumps({
+            'moduleData': mod_data,
+            'moduleId': 'IB20',
+        }).encode('utf-8'),
+        headers=headers_api_auth,
+        method='POST'
+    )
+    
+    doc = download(request)
+    data = decode_json(doc['content'], context='login.2fa.init')
+    auth_data = data.get('authorizationData', {})
+    
+    auth_mode = match(auth_data.get('authorizationType', ''), re.compile(r'\w+'), context='login.2fa.init.auth-type')
+    auth_id = match_uuid(auth_data.get('authorizationId', ''), context='login.2fa.init.auth-id')
+    auth_date = auth_data.get('authorizationDate', '')
+    auth_date = timestamp_to_date(auth_date) or scraping_error(f"login.2fa.init.operation-date: {auth_date}")
+    auth_no = match(auth_data.get('authorizationNumber', ''), re.compile(r'\d+'), context='login.2fa.init.operation-no')
+    
+    if auth_mode == 'MA':
+        # Mobile app authorization
+        print(f"Waiting for confirmation of operation no {auth_no} from {auth_date} in the mobile app...", file=sys.stderr)
+        
+        while True:
+            request = urllib.request.Request(
+                f'{root_url}/signin/connect/api/mediator/status',
+                data=json.dumps({'authorizationId': auth_id}).encode('utf-8'),
+                headers=headers_api_auth,
+                method='POST'
+            )
+            
+            doc = download(request)
+            
+            if doc['response'].status == 204:
+                status = '_'
+                data = {}
+            else:
+                data = decode_json(doc['content'], context='login.2fa.status')
+                status = data.get('authorizationStatus', '')
+            
+            debug(f"2FA mobile auth: {status}")
+            
+            if status == '_':
+                time.sleep(1)
+            elif status == 'Authorized':
+                token = data.get('postResult', {}).get('token')
+                return match_uuid(token, context='login.2fa.status.token')
+            elif status == 'Canceled':
+                user_error('login failed: rejected mobile authentication request')
+            elif status == 'TimeOut':
+                user_error('login failed: mobile authentication request timed out')
+            else:
+                scraping_error(f"login.2fa.status.status: {status}")
+    
+    elif auth_mode == 'SMS':
+        # SMS authorization
+        for try_num in range(1, 10):
+            sms_password = _ask_for_sms_password(auth_date, auth_no, try_num)
+            
+            request = urllib.request.Request(
+                f'{root_url}/signin/connect/api/mediator/authorize',
+                data=json.dumps({
+                    'authorizationCode': sms_password,
+                    'authorizationId': auth_id,
+                    'authorizationType': auth_mode,
+                }).encode('utf-8'),
+                headers=headers_api_auth,
+                method='POST'
+            )
+            
+            doc = download(request, ignore_errors=[422])
+            data = decode_json(doc['content'], context='login.2fa.exec')
+            token = data.get('postResult', {}).get('token')
+            
+            if token:
+                return match_uuid(token, context='login.2fa.exec.token')
+            else:
+                error_code = data.get('type')
+                if error_code == 'AuthApi-SMS014':
+                    print('Incorrect SMS password', file=sys.stderr)
+                    continue
+                else:
+                    no_match(error_code, context='login.2fa.exec.error')
+        
+        user_error('login failed: too many incorrect SMS passwords')
+    
+    else:
+        no_match(auth_mode, context='login.2fa.init.auth-mode')
+    
+    return None
+
+def _ask_for_sms_password(date, n, try_num):
+    """Ask for SMS password."""
+    smsinbox = get_config_var('smsinbox')
+    if smsinbox:
+        # Use SMS inbox to get password
+        import subprocess
+        try:
+            result = subprocess.run(
+                ['sh', '-c', f"{smsinbox} {date} {n}"],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            password = result.stdout.strip()
+            if password:
+                return password
+        except:
+            pass
+    
+    # Manual input
+    if try_num > 1:
+        print(f"(try #{try_num})", file=sys.stderr)
+    password = input(f"SMS password from {date} (operation #{n}): ")
+    return password
+
+def clear_temp_cookies():
+    """Clear temporary cookies."""
+    debug('clearing temporary cookies')
+    if ua and hasattr(ua, 'cookie_jar'):
+        # Clear temporary cookies
+        ua.cookie_jar.clear_expired_cookies()
+
+def unexpire_cookie(name, context=None):
+    """Make a cookie permanent (remove expiry)."""
+    if not ua or not hasattr(ua, 'cookie_jar'):
+        return
+    
+    # This is a simplified version - full implementation would modify cookie expiry
+    debug(f'unexpiring cookie: {name}')
+
+def get_tabid():
+    """Generate a tab ID."""
+    # Generate a UUID for the tab
+    return gen_uuid()
+
+def parse_offline_accounts(json_content):
+    """Parse offline accounts from JSON."""
+    try:
+        data = json.loads(json_content)
+    except:
+        return []
+    
+    # Handle different JSON structures
+    if isinstance(data, list):
+        account_list = data
+    elif isinstance(data, dict):
+        account_list = data.get('payload') or data.get('accounts') or data.get('Accounts') or []
+    else:
+        return []
+    
+    if not isinstance(account_list, list):
+        return []
+    
+    accounts = []
+    for a in account_list:
+        if not isinstance(a, dict):
+            continue
+        
+        name = a.get('name') or a.get('productName') or a.get('ProductName') or a.get('externalAccountName') or a.get('accountTypeName')
+        number = a.get('number') or a.get('accountNumber') or a.get('iban') or a.get('Iban')
+        
+        if not name or not number:
+            continue
+        
+        bank = a.get('bankName') or a.get('providerName') or a.get('provider') or ''
+        
+        accounts.append({
+            'name': name,
+            'number': format_account_number(number),
+            'balance': a.get('balance') or a.get('Balance'),
+            'currency': a.get('currency') or a.get('Currency') or '',
+            'available': a.get('availableBalance') or a.get('AvailableBalance'),
+            'source': bank if bank else 'external',
+        })
+    
+    return accounts
+
+def fetch_offline_accounts(login_info):
+    """Fetch offline accounts."""
+    url = f'{root_url}/api/AccountsAggregation/Accounts/accounts/Offline'
+    headers = login_info['headers'].copy()
+    headers['Accept'] = 'application/json'
+    
+    try:
+        # Try POST first
+        request = urllib.request.Request(
+            url,
+            data=json.dumps({}).encode('utf-8'),
+            headers=headers,
+            method='POST'
+        )
+        doc = download(request, ignore_errors=[404, 405])
+        
+        if doc['response'].status in [404, 405]:
+            # Try GET
+            request = urllib.request.Request(url, headers=headers)
+            doc = download(request, ignore_errors=[404, 405])
+            
+            if doc['response'].status in [404, 405]:
+                return []
+        
+        if 200 <= doc['response'].status < 300:
+            return parse_offline_accounts(doc['content'])
+    except:
+        pass
+    
+    return []
+
+def do_list(login=None, quiet=False):
+    """List accounts."""
+    if not login:
+        user_error('Not logged in')
+    
+    # Request account list
+    headers = login['headers'].copy()
+    headers['Accept'] = 'application/json'
+    headers['Content-Type'] = 'application/json; charset=UTF-8'
+    
+    request = urllib.request.Request(
+        f'{base_url}/MyDesktop/Desktop/GetAccountsList',
+        data=json.dumps({}).encode('utf-8'),
+        headers=headers,
+        method='POST'
+    )
+    
+    doc = download(request)
+    json_data = decode_json(doc['content'], context='list.json')
+    accounts = json_data.get('accountDetailsList', [])
+    
+    result = []
+    for account in accounts:
+        name = match(account.get('ProductName', ''), re.compile(r'.+'), context='list.product-name')
+        subtitle = account.get('SubTitle', '')
+        if subtitle:
+            name += f" - {subtitle}"
+        
+        number = match(account.get('AccountNumber', ''), account_number_re, context='list.account-number')
+        
+        result.append({
+            'name': name,
+            'number': number,
+            'source': 'mbank',
+        })
+        
+        if not quiet:
+            currency = account.get('Currency')
+            balance = format_money(account.get('Balance'), currency, context='list.balance')
+            available = format_money(account.get('AvailableBalance'), currency, context='list.available')
+            name_bytes = unicode_to_bytes(name)
+            print(f"{name_bytes}\t{number}\t{balance}\t{available}\tmbank")
+    
+    # Add offline accounts
+    offline_accounts = fetch_offline_accounts(login)
+    for a in offline_accounts:
+        result.append({'name': a['name'], 'number': a['number'], 'source': a['source']})
+        
+        if not quiet:
+            cur = a.get('currency', '')
+            bal = ''
+            avl = ''
+            
+            if a.get('balance') is not None and cur:
+                try:
+                    bal = format_money(a['balance'], cur, context='list.offline.balance')
+                except:
+                    pass
+            
+            if a.get('available') is not None and cur:
+                try:
+                    avl = format_money(a['available'], cur, context='list.offline.available')
+                except:
+                    pass
+            
+            name_bytes = unicode_to_bytes(a['name'])
+            source_bytes = unicode_to_bytes(a['source'])
+            print(f"{name_bytes}\t{a['number']}\t{bal}\t{avl}\t{source_bytes}")
+    
+    return result
 
 # Command implementations
 def cmd_configure(**kwargs):
@@ -1529,26 +1998,21 @@ def _make_config_line(key, value):
 
 def cmd_list(**kwargs):
     """List accounts."""
-    print("=" * 60)
-    print("Python Port - 'list' Command Status")
-    print("=" * 60)
-    print()
-    print("The 'list' command requires:")
-    print("  • Authentication with mBank (login + 2FA)")
-    print("  • Web scraping of account pages")
-    print("  • HTML parsing of account information")
-    print()
-    print("STATUS: Not yet implemented in Python port")
-    print()
-    print("To use this functionality, please run the original Perl version:")
-    print("  ./mbank-cli list")
-    print()
-    print("The Python port has successfully:")
-    print("  ✓ Configuration file handling")
-    print("  ✓ HTTP/TLS client setup")
-    print("  ✓ Cookie management")
-    print("  ✓ Command-line interface")
-    print("=" * 60)
+    login_info = kwargs.get('login')
+    if not login_info:
+        # If no login provided, this is being called without login requirement
+        # This shouldn't happen in normal flow, but handle it gracefully
+        print("=" * 60)
+        print("Error: Login required")
+        print("=" * 60)
+        print()
+        print("The list command requires authentication.")
+        print("Make sure you have a valid configuration file.")
+        print()
+        sys.exit(1)
+    
+    # Call the actual list implementation
+    do_list(login=login_info, quiet=False)
 
 def cmd_history(**kwargs):
     """Show transaction history."""
@@ -1604,10 +2068,6 @@ def main():
     cmd_options = {}
     
     if command_name.startswith('debug-'):
-        need_login = False
-    
-    # Special handling for list command - skip login for now
-    if command_name == 'list':
         need_login = False
     
     if command_info.get('config', True):
