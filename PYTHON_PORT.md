@@ -2,6 +2,21 @@
 
 This is a 1:1 port of the Perl-based mbank-cli to Python 3.9+.
 
+## 🚨 IMPORTANT: How to Run the Python Version
+
+**Always use:** `python3 mbank-cli.py` ← **Note the `.py` extension!**
+
+❌ **WRONG:** `python3 mbank-cli` (this tries to run the Perl script with Python and fails)  
+✅ **CORRECT:** `python3 mbank-cli.py`
+
+Examples:
+```bash
+python3 mbank-cli.py configure    # Configure your account
+python3 mbank-cli.py list         # List your accounts
+```
+
+---
+
 ## ⚠️ Requirements
 
 **Python 3.9 or later is required!**

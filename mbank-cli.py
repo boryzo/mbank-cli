@@ -3,6 +3,10 @@
 # Copyright © 2006-2025 Jakub Wilk <jwilk@jwilk.net>
 # SPDX-License-Identifier: MIT
 
+# NOTE: This is mbank-cli.py (Python version)
+# Run with: python3 mbank-cli.py [command]
+# NOT: python3 mbank-cli (that's the Perl version and won't work with Python!)
+
 import sys
 
 # Check Python version early
