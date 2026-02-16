@@ -3,6 +3,10 @@
 # Copyright © 2006-2025 Jakub Wilk <jwilk@jwilk.net>
 # SPDX-License-Identifier: MIT
 
+# NOTE: This is mbank-cli.py (Python version)
+# Run with: python3 mbank-cli.py [command]
+# NOT: python3 mbank-cli (that's the Perl version and won't work with Python!)
+
 import sys
 
 # Check Python version early
@@ -26,6 +30,8 @@ import ssl
 import time
 import locale
 import codecs
+import gzip
+import zlib
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from html.parser import HTMLParser
@@ -81,7 +87,10 @@ def http_error(request, response):
     """Handle HTTP errors."""
     message = f'HTTP error {response.status} on <{request.method} {request.full_url}>'
     
-    if response.status == 500:
+    # Only read error content for client-side errors (like SSL failures)
+    # This matches the Perl version which checks for "Client-Warning: Internal response"
+    client_warning = response.headers.get('Client-Warning', '')
+    if response.status == 500 and client_warning == 'Internal response':
         try:
             extra = response.read().decode('utf-8', errors='replace')
             extra = extra.rstrip('\n')
@@ -431,6 +440,12 @@ def http_init(cookie_jar=None, ca=None):
         try:
             cj.load(ignore_discard=True, ignore_expires=True)
         except FileNotFoundError:
+            # Cookie file doesn't exist yet, will be created on save
+            pass
+        except http.cookiejar.LoadError as e:
+            # Cookie file exists but is corrupted or in wrong format
+            # Start with empty cookie jar (will overwrite on save)
+            debug(f"Cookie file load error (will start fresh): {e}")
             pass
     else:
         cj = http.cookiejar.CookieJar()
@@ -451,6 +466,19 @@ def http_init(cookie_jar=None, ca=None):
     
     return ua
 
+def _decode_http_content(content, headers):
+    """Decode HTTP content handling gzip/deflate encoding."""
+    # Handle gzip/deflate encoding
+    encoding = headers.get('Content-Encoding')
+    if encoding == 'gzip':
+        content = gzip.decompress(content)
+    elif encoding == 'deflate':
+        content = zlib.decompress(content)
+    
+    content = content.decode('utf-8', errors='replace')
+    content = content.replace('\r', '')
+    return content
+
 def download(request, ignore_errors=False, redact=None):
     """Download content from a URL."""
     method = request.get_method()
@@ -468,18 +496,7 @@ def download(request, ignore_errors=False, redact=None):
     try:
         response = ua.open(request, timeout=http_timeout)
         content = response.read()
-        
-        # Handle gzip/deflate encoding
-        encoding = response.headers.get('Content-Encoding')
-        if encoding == 'gzip':
-            import gzip
-            content = gzip.decompress(content)
-        elif encoding == 'deflate':
-            import zlib
-            content = zlib.decompress(content)
-        
-        content = content.decode('utf-8', errors='replace')
-        content = content.replace('\r', '')
+        content = _decode_http_content(content, response.headers)
         
         # Save debug output
         if opt_debug_dir:
@@ -521,7 +538,12 @@ def download(request, ignore_errors=False, redact=None):
     except urllib.error.HTTPError as e:
         if isinstance(ignore_errors, list):
             if e.code in ignore_errors:
-                return {'response': e, 'content': '', 'url': url}
+                # Read error response content (similar to Perl's decoded_content)
+                content = e.read()
+                
+                content = _decode_http_content(content, e.headers)
+                
+                return {'response': e, 'content': content, 'url': url}
         if not ignore_errors:
             class FakeRequest:
                 def __init__(self, method, url):
