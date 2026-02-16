@@ -828,3 +828,622 @@ def match_ymd_date(timestamp, context=None, time_must_be=None):
         return result
     return no_match(timestamp, context=context)
 
+def parse_dmy_date(orig_date, context=None):
+    """Parse a day-month-year date.
+    
+    >>> parse_dmy_date('30-07-2006', context='foo')
+    '2006-07-30'
+    
+    >>> parse_dmy_date('30.07.2006', context='foo')
+    '2006-07-30'
+    """
+    date = None
+    if isinstance(orig_date, str):
+        date = _parse_dmy_date(orig_date)
+    
+    if date is None:
+        qdate = quote(orig_date)
+        scraping_error(f"{context}: {qdate} is not a valid day-month-year date")
+    
+    return date
+
+def _parse_dmy_date(date):
+    """Internal function to parse day-month-year date."""
+    m = re.match(r'^(\d{2})([.-])(\d{2})\2(\d{4})$', date)
+    if not m:
+        return None
+    
+    d, _, m_val, y = m.groups()
+    date = f"{y}-{m_val}-{d}"
+    
+    try:
+        dt = datetime.strptime(date, '%Y-%m-%d')
+        pdate = dt.strftime('%Y-%m-%d')
+        if date != pdate:
+            return None
+        return date
+    except:
+        return None
+
+def shift_date(date, offset):
+    """Shift a date by a number of days."""
+    new_date = _shift_date(date, offset)
+    if new_date is None:
+        internal_error(f"shift_date(): could not shift {date} by {offset} days")
+    return new_date
+
+def _shift_date(date, offset):
+    """Internal function to shift a date."""
+    try:
+        dt = datetime.strptime(date, '%Y-%m-%d')
+        new_dt = dt + timedelta(days=offset)
+        new_date = new_dt.strftime('%Y-%m-%d')
+        if re.match(r'^\d{4}-\d{2}-\d{2}$', new_date):
+            return new_date
+    except:
+        pass
+    return None
+
+def parse_http_date(s, context=None):
+    """Parse HTTP date header to datetime object."""
+    match(s, re.compile(r'.+'), context=context)
+    
+    from email.utils import parsedate_to_datetime
+    try:
+        dt = parsedate_to_datetime(s)
+        return dt
+    except:
+        return no_match(s, context=context)
+
+def local_date(dt):
+    """Convert datetime to local date string."""
+    if not isinstance(dt, datetime):
+        internal_error('local_date(): invalid argument')
+    
+    # Convert to Europe/Warsaw timezone
+    import zoneinfo
+    try:
+        tz = zoneinfo.ZoneInfo('Europe/Warsaw')
+        local_dt = dt.astimezone(tz)
+        
+        # Check if offset is 0 (should never be for Poland)
+        if local_dt.utcoffset().total_seconds() == 0:
+            internal_error("local_date(): could not set TZ=Europe/Warsaw")
+        
+        return local_dt.strftime('%Y-%m-%d')
+    except:
+        # Fallback without zoneinfo
+        return dt.strftime('%Y-%m-%d')
+
+def local_midnight_to_utc(date):
+    """Convert local midnight to UTC timestamp.
+    
+    >>> local_midnight_to_utc('2006-07-30')
+    '2006-07-29T22:00:00.000Z'
+    
+    >>> local_midnight_to_utc('2009-12-08')
+    '2009-12-07T23:00:00.000Z'
+    """
+    import zoneinfo
+    try:
+        tz = zoneinfo.ZoneInfo('Europe/Warsaw')
+    except:
+        # Fallback
+        tz = timezone(timedelta(hours=1))
+    
+    dt = datetime.strptime(date, '%Y-%m-%d')
+    local_dt = dt.replace(tzinfo=tz)
+    utc_dt = local_dt.astimezone(timezone.utc)
+    
+    datetime_str = utc_dt.strftime('%Y-%m-%dT%H:%M:%S')
+    
+    # Check if time is all zeros (shouldn't be for Poland)
+    if re.match(r'T[0:]+$', datetime_str.split('T')[1]):
+        internal_error("local_midnight_to_utc(): could not set TZ=Europe/Warsaw")
+    
+    return f"{datetime_str}.000Z"
+
+def js_time():
+    """Get JavaScript-style timestamp (milliseconds since epoch).
+    
+    Like Tor Browser, we support only 100ms accuracy.
+    
+    >>> js_time()
+    1570127042900
+    """
+    t = time.time()
+    # Round to 100ms accuracy
+    t = int(t * 10) * 100
+    return t
+
+# ============
+# HTML parsing
+# ============
+
+class HTMLElement:
+    """Simple HTML element wrapper."""
+    def __init__(self, tag, attrs, parent=None):
+        self.tag = tag
+        self.attrs = attrs or {}
+        self.parent = parent
+        self.children = []
+        self.text = ''
+    
+    def attr(self, name):
+        """Get an attribute value."""
+        return self.attrs.get(name)
+    
+    def look_down(self, predicate):
+        """Find elements matching a predicate."""
+        results = []
+        if predicate(self):
+            results.append(self)
+        for child in self.children:
+            results.extend(child.look_down(predicate))
+        return results
+
+class SimpleHTMLParser(HTMLParser):
+    """Simple HTML parser to build element tree."""
+    def __init__(self):
+        super().__init__()
+        self.root = None
+        self.current = None
+        self.stack = []
+    
+    def handle_starttag(self, tag, attrs):
+        elem = HTMLElement(tag, dict(attrs), self.current)
+        if self.root is None:
+            self.root = elem
+        if self.current:
+            self.current.children.append(elem)
+        self.stack.append(self.current)
+        self.current = elem
+    
+    def handle_endtag(self, tag):
+        if self.stack:
+            self.current = self.stack.pop()
+    
+    def handle_data(self, data):
+        if self.current:
+            self.current.text += data
+
+def html_new(s):
+    """Create HTML element tree from string."""
+    parser = SimpleHTMLParser()
+    parser.feed(s)
+    return parser.root
+
+def html_class_regexp(class_name):
+    """Create regex for matching HTML class."""
+    return re.compile(rf'(?:^|\s){re.escape(class_name)}(?:\s|$)')
+
+def has_html_class(element, class_name):
+    """Check if element has a specific class."""
+    element_class = element.attr('class') or ''
+    return bool(html_class_regexp(class_name).search(element_class))
+
+def html_find(root_elt, tag=None, class_=None, id=None, name=None, type=None, n=None, context=None):
+    """Find HTML elements matching criteria.
+    
+    In scalar context (n=1), returns single element.
+    """
+    attrs = {}
+    if id is not None:
+        attrs['id'] = id
+    if name is not None:
+        attrs['name'] = name
+    if type is not None:
+        attrs['type'] = type
+    
+    classes = []
+    if class_:
+        if isinstance(class_, list):
+            classes = class_
+        elif isinstance(class_, str):
+            classes = class_.split()
+        else:
+            internal_error('html_find(): invalid argument', 1)
+    
+    def predicate(elt):
+        # Check classes
+        for cls in classes:
+            if not has_html_class(elt, cls):
+                return False
+        
+        # Check tag
+        if tag and elt.tag != tag:
+            return False
+        
+        # Check attributes
+        for aname, avalue in attrs.items():
+            if (elt.attr(aname) or '') != avalue:
+                return False
+        
+        return True
+    
+    result = root_elt.look_down(predicate)
+    
+    if n is not None:
+        if context is None:
+            internal_error('html_find(): missing keyword argument: context', 1)
+        if len(result) != n:
+            scraping_error(f"{context}: expected {n} element(s), got {len(result)}")
+    
+    if n == 1:
+        return result[0] if result else None
+    return result
+
+# ====
+# JSON
+# ====
+
+def encode_json(obj):
+    """Encode object to JSON."""
+    return json.dumps(obj, ensure_ascii=True)
+
+def decode_json(json_str, context=None, type=None):
+    """Decode JSON with type checking.
+    
+    type can be {} for object or [] for array.
+    """
+    if type is None:
+        type = {}
+    
+    try:
+        obj = json.loads(json_str)
+    except json.JSONDecodeError as e:
+        scraping_error(f"{context}: {e}")
+    
+    return check_type(obj, type, context=context)
+
+def json_content(obj):
+    """Return tuple for setting JSON content in request."""
+    return (
+        encode_json(obj),
+        'application/json; charset=UTF-8',
+    )
+
+# =====
+# UUIDs
+# =====
+
+uuid_template = 'XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX'
+
+def parse_uuid(s):
+    """Parse and validate a UUID string."""
+    uuid_pattern = uuid_template.replace('X', '[0-9a-fA-F]')
+    if re.match(f'^{uuid_pattern}$', s):
+        return s
+    return None
+
+def gen_uuid():
+    """Generate a random UUID."""
+    import uuid
+    return str(uuid.uuid4())
+
+def match_uuid(s, context=None):
+    """Match and validate a UUID string."""
+    result = parse_uuid(s)
+    if result:
+        return result
+    return no_match(s, context=context)
+
+# ==================
+# terminal functions
+# ==================
+
+def term_new():
+    """Create a new terminal/readline interface."""
+    # Simple stub - in real implementation would use readline
+    class SimpleTerm:
+        def readline(self, prompt, default=''):
+            try:
+                result = input(prompt)
+                return result if result else default
+            except EOFError:
+                return None
+    return SimpleTerm()
+
+def term_readpasswd(prompt='Password: '):
+    """Read password from terminal."""
+    return getpass.getpass(prompt)
+
+# ========================
+# Main program and helpers
+# ========================
+
+VERSION = '20250101'  # Version placeholder
+mbank_host = None
+root_url = None
+base_url = None
+csite_url = None
+
+opt_config = None
+opt_cookie_jar = None
+opt_start_date = None
+opt_end_date = None
+opt_with_id = False
+opt_export = None
+opt_multi = False
+opt_all = False
+
+def show_help():
+    """Show help message."""
+    print("""Usage: mbank-cli [OPTIONS] COMMAND [ARGS...]
+
+Options:
+  --verbose               Enable verbose output
+  --debug DIR             Enable debug mode and save debug info to DIR
+  --debug-interactive     Enable interactive debugging
+  --config FILE           Configuration file path
+  --cookie-jar FILE       Cookie jar file path
+  --from DATE             Start date (YYYY-MM-DD)
+  --to DATE               End date (YYYY-MM-DD)
+  --with-id               Show transaction IDs
+  --export FORMAT         Export format (CSV, HTML, PDF)
+  -M, --multiple-accounts Show account names
+  -A, --all-accounts      Select all accounts
+  -h, --help              Show this help
+  --version               Show version
+
+Commands:
+  list                    List accounts
+  history                 Show transaction history
+  history2019             Show transaction history (2019+ API)
+  future                  Show future transactions
+  blocked                 Show blocked amounts
+  deposits                Show deposits
+  cards                   Show cards
+  funds                   Show funds
+  pension                 Show pension
+  notices                 Show notices
+  logout                  Logout
+  register-device         Register device
+  activate-profile        Activate profile
+  configure               Configure mbank-cli
+""")
+    sys.exit(0)
+
+def show_version():
+    """Show version information."""
+    print(f"mbank-cli {VERSION}")
+    print(f"+ Python {sys.version.split()[0]}")
+    print(f"+ urllib.request (built-in)")
+    print(f"+ http.cookiejar (built-in)")
+    sys.exit(0)
+
+def check_user_date(option, date):
+    """Validate a user-provided date."""
+    if not re.match(r'^\d{4}-\d{2}-\d{2}$', date):
+        user_error(f"--{option} date not in the YYYY-MM-DD format: {date}")
+    
+    try:
+        datetime.strptime(date, '%Y-%m-%d')
+    except ValueError:
+        user_error(f"invalid --{option} date: {date}")
+    
+    return date
+
+def check_export_format(option, format):
+    """Validate export format."""
+    format = format.upper()
+    valid_formats = ['CSV', 'HTML', 'PDF']
+    if format not in valid_formats:
+        user_error(f"--{option} format not in {', '.join(valid_formats)}")
+    return format
+
+def expand_tilde(path):
+    """Expand ~ in file paths."""
+    if path.startswith('~'):
+        return os.path.expanduser(path)
+    return path
+
+def unexpand_tilde(path):
+    """Replace home directory with ~ in path."""
+    home = os.path.expanduser('~')
+    if path.startswith(home):
+        return '~' + path[len(home):]
+    return path
+
+def xdg_config_home():
+    """Get XDG config home directory."""
+    xdg = os.environ.get('XDG_CONFIG_HOME')
+    if xdg:
+        return xdg
+    return os.path.expanduser('~/.config')
+
+def xdg_data_home():
+    """Get XDG data home directory."""
+    xdg = os.environ.get('XDG_DATA_HOME')
+    if xdg:
+        return xdg
+    return os.path.expanduser('~/.local/share')
+
+def makedirs(path):
+    """Create directory and parents if needed."""
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError as e:
+        os_error(f"{path}: {e}")
+
+def initialize():
+    """Initialize configuration and HTTP client."""
+    global global_config, ua, mbank_host, root_url, base_url, csite_url
+    
+    if not os.path.exists(opt_config):
+        user_error(
+            f"missing configuration file: {opt_config}\n" +
+            'Run "mbank-cli configure" or create the configuration file manually.'
+        )
+    
+    global_config = read_config(opt_config)
+    
+    if opt_cookie_jar:
+        cookie_jar_path = opt_cookie_jar
+    else:
+        cookie_jar_path = get_config_var('cookiejar')
+        if not cookie_jar_path:
+            config_error('missing cookiejar')
+        cookie_jar_path = expand_tilde(cookie_jar_path)
+    
+    debug(f"cookiejar = {cookie_jar_path}")
+    
+    ca_path = get_config_var('cafile')
+    if ca_path:
+        ca_path = expand_tilde(ca_path)
+        if not os.path.isfile(ca_path):
+            os_error(f"{ca_path}: file not found")
+        debug(f"cafile = {ca_path}")
+    
+    tld = get_config_var('country')
+    if not tld:
+        config_error('missing country')
+    
+    tld = tld.lower()
+    lang = country_to_language.get(tld)
+    if not lang:
+        user_error(f"unknown country {tld.upper()}, not in {', '.join(known_countries).upper()}")
+    
+    mbank_host = f"online.mbank.{tld}"
+    root_url = f"https://{mbank_host}"
+    base_url = f"https://{mbank_host}/{lang}"
+    csite_url = f"https://{mbank_host}/csite"
+    
+    http_init(cookie_jar=cookie_jar_path, ca=ca_path)
+
+def parse_args():
+    """Parse command-line arguments."""
+    global opt_verbose, opt_debug_dir, opt_debug_interactive
+    global opt_config, opt_cookie_jar, opt_start_date, opt_end_date
+    global opt_with_id, opt_export, opt_multi, opt_all
+    
+    parser = argparse.ArgumentParser(
+        prog='mbank-cli',
+        add_help=False,
+        description='Command-line interface to mBank'
+    )
+    
+    parser.add_argument('--verbose', action='store_true', help='Enable verbose output')
+    parser.add_argument('--debug', metavar='DIR', help='Enable debug mode')
+    parser.add_argument('--debug-interactive', action='store_true', help='Enable interactive debugging')
+    parser.add_argument('--config', metavar='FILE', help='Configuration file')
+    parser.add_argument('--cookie-jar', metavar='FILE', help='Cookie jar file')
+    parser.add_argument('--from', dest='from_date', metavar='DATE', help='Start date (YYYY-MM-DD)')
+    parser.add_argument('--to', dest='to_date', metavar='DATE', help='End date (YYYY-MM-DD)')
+    parser.add_argument('--with-id', action='store_true', help='Show transaction IDs')
+    parser.add_argument('--export', metavar='FORMAT', help='Export format (CSV, HTML, PDF)')
+    parser.add_argument('-M', '--multiple-accounts', action='store_true', help='Show account names')
+    parser.add_argument('-A', '--all-accounts', action='store_true', help='Select all accounts')
+    parser.add_argument('-h', '--help', action='store_true', help='Show help')
+    parser.add_argument('--version', action='store_true', help='Show version')
+    parser.add_argument('command', nargs='?', help='Command to execute')
+    parser.add_argument('args', nargs='*', help='Command arguments')
+    
+    try:
+        args = parser.parse_args()
+    except SystemExit:
+        user_error('Invalid arguments')
+    
+    if args.help:
+        show_help()
+    
+    if args.version:
+        show_version()
+    
+    opt_verbose = args.verbose
+    opt_debug_interactive = args.debug_interactive
+    opt_config = args.config or os.path.join(xdg_config_home(), 'mbank-cli', 'config')
+    opt_cookie_jar = args.cookie_jar
+    opt_with_id = args.with_id
+    opt_multi = args.multiple_accounts
+    opt_all = args.all_accounts
+    
+    if args.debug:
+        if args.debug.startswith('-'):
+            user_error(f"suspicious directory name for --debug: {args.debug}")
+        makedirs(args.debug)
+        opt_debug_dir = args.debug
+    
+    if args.from_date:
+        opt_start_date = check_user_date('from', args.from_date)
+    
+    if args.to_date:
+        opt_end_date = check_user_date('to', args.to_date)
+    
+    if args.export:
+        opt_export = check_export_format('export', args.export)
+        if sys.stdout.isatty():
+            user_error('export data cannot be written to a terminal; please redirect stdout to a file')
+    
+    command = args.command or 'list'
+    return command, args.args
+
+def do_login():
+    """Perform login (stub)."""
+    # This is a stub - full implementation would require extensive web scraping
+    user_error('Login not yet implemented in Python version')
+
+def do_list(**kwargs):
+    """List accounts (stub)."""
+    # This is a stub - full implementation would require extensive web scraping
+    user_error('List command not yet implemented in Python version')
+
+def main():
+    """Main entry point."""
+    command_name, args = parse_args()
+    debug(f"selected command: {command_name}")
+    
+    commands = {
+        'debug-noop': {},
+        'debug-https-get': {'args': True},
+        'debug-sms-password': {'args': True},
+        'list': {},
+        'history': {'accounts': True, 'dates': True, 'ids': True, 'export': True},
+        'history2019': {'accounts': True, 'dates': True, 'ids': True, 'export': True},
+        'future': {'accounts': True, 'dates': True},
+        'blocked': {'accounts': True},
+        'deposits': {},
+        'cards': {},
+        'funds': {},
+        'pension': {},
+        'notices': {},
+        'logout': {'login': False},
+        'register-device': {'login': False, 'args': True},
+        'activate-profile': {'args': True},
+        'configure': {'login': False, 'config': False},
+    }
+    
+    command_info = commands.get(command_name)
+    if not command_info:
+        user_error(f"{command_name}: invalid command")
+    
+    need_login = command_info.get('login', True)
+    
+    if command_name.startswith('debug-'):
+        need_login = False
+    
+    if command_info.get('config', True):
+        initialize()
+    
+    if command_info.get('todo'):
+        user_error(f"{command_name}: command not implemented")
+    
+    # Command not fully implemented - this is a skeleton
+    user_error(f"{command_name}: command implementation incomplete in Python port")
+
+if __name__ == '__main__':
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nInterrupted", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        # Save cookies
+        if ua and hasattr(ua, 'cookie_jar'):
+            try:
+                if hasattr(ua.cookie_jar, 'save'):
+                    ua.cookie_jar.save(ignore_discard=True, ignore_expires=True)
+            except:
+                pass
+
+# vim:ts=4 sts=4 sw=4 et
