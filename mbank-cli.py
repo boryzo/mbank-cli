@@ -440,6 +440,12 @@ def http_init(cookie_jar=None, ca=None):
         try:
             cj.load(ignore_discard=True, ignore_expires=True)
         except FileNotFoundError:
+            # Cookie file doesn't exist yet, will be created on save
+            pass
+        except http.cookiejar.LoadError as e:
+            # Cookie file exists but is corrupted or in wrong format
+            # Start with empty cookie jar (will overwrite on save)
+            debug(f"Cookie file load error (will start fresh): {e}")
             pass
     else:
         cj = http.cookiejar.CookieJar()
