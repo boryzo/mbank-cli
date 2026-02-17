@@ -55,6 +55,7 @@ class TestAccounts(unittest.TestCase):
             ('b5165570-f6f1-11e8-8eb2-f2801f1b9fd1', 'Bank Pekao SA'),
             ('555dd77f-7424-4bf7-8869-5576e47793b9', 'Santander Bank Polska'),
             ('a32d692c-397e-4307-9da8-8367fc3f9237', 'Santander Bank Polska'),
+            ('0789b9be-67d1-468d-9c98-93eb9a058630', 'VeloBank'),
         ]
         for bank_id, expected in cases:
             raw = {

@@ -17,7 +17,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 
 opt_verbose = False
 opt_debug_dir = None
@@ -55,6 +56,7 @@ external_bank_source_map = {
     'b5165570-f6f1-11e8-8eb2-f2801f1b9fd1': 'Bank Pekao SA',
     '555dd77f-7424-4bf7-8869-5576e47793b9': 'Santander Bank Polska',
     'a32d692c-397e-4307-9da8-8367fc3f9237': 'Santander Bank Polska',
+    '0789b9be-67d1-468d-9c98-93eb9a058630': 'VeloBank',
 }
 
 
@@ -324,6 +326,11 @@ def parse_args():
 
     sub = parser.add_subparsers(dest='command')
     sub.add_parser('list', help='List accounts')
+    p = sub.add_parser('history', help='Account history')
+    p.add_argument('--from', dest='start_date')
+    p.add_argument('--to', dest='end_date')
+    p.add_argument('--with-id', action='store_true', help='Deprecated: IDs are always included')
+    p.add_argument('--all', action='store_true', help='Include external (aggregated) accounts')
     sub.add_parser('logout', help='Logout')
     p = sub.add_parser('register-device', help='Register device')
     p.add_argument('name', nargs='?', default='CLI')
@@ -530,6 +537,38 @@ def timestamp_to_date(ts):
     return m.group(1) if m else ''
 
 
+def parse_ymd_date_or_fail(value, context):
+    text = str(value or '').strip()
+    if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', text):
+        fail(f'{context}: invalid date {text!r}')
+    return text
+
+
+def local_midnight_to_utc(date_text):
+    dt = datetime.fromisoformat(f'{date_text}T00:00:00').astimezone(timezone.utc)
+    return dt.strftime('%Y-%m-%dT%H:%M:%S.000Z')
+
+
+def http_date_to_local_ymd(date_header):
+    if not date_header:
+        return datetime.now().date().isoformat()
+    try:
+        dt = parsedate_to_datetime(date_header)
+        return dt.astimezone().date().isoformat()
+    except Exception:
+        return datetime.now().date().isoformat()
+
+
+def shift_ymd(date_text, days):
+    return (datetime.fromisoformat(date_text).date() + timedelta(days=days)).isoformat()
+
+
+def sanitize_field(value):
+    text = '' if value is None else str(value)
+    text = text.replace('\r', ' ').replace('\n', ' ').strip()
+    return text.replace(';', ',')
+
+
 def ask_sms_password(date, operation_no, try_num):
     if try_num > 1:
         print(f'(try #{try_num})', file=sys.stderr)
@@ -546,6 +585,291 @@ def post_json(url, payload, headers=None, ignore_errors=()):
         method='POST',
     )
     return download(req, ignore_errors=ignore_errors)
+
+
+def get_main_accounts(login_info, context='list.json'):
+    headers = {
+        **login_info['headers'],
+        **header_accept_json,
+        'Content-Type': 'application/json; charset=UTF-8',
+    }
+    req = urllib.request.Request(
+        f'{base_url}/MyDesktop/Desktop/GetAccountsList',
+        data=b'{}',
+        headers=headers,
+        method='POST',
+    )
+    doc = download(req)
+    data = decode_json(doc['content'], context)
+    raw_accounts = data.get('accountDetailsList')
+    if not isinstance(raw_accounts, list):
+        fail('list: accountDetailsList missing', code=3)
+    out = []
+    for raw in raw_accounts:
+        acc = normalize_mbank_account(raw)
+        if acc:
+            out.append(acc)
+    return out
+
+
+def build_history_query(product_id, start_date, end_date, compact=False, null_amount=False):
+    if compact:
+        params = {
+            'productIds': product_id,
+            'dateFrom': local_midnight_to_utc(start_date),
+            'dateTo': local_midnight_to_utc(end_date),
+            'sortingOrder': 'ByDate',
+        }
+    else:
+        amount_empty = 'null' if null_amount else ''
+        params = {
+            'productIds': product_id,
+            'amountFrom': amount_empty,
+            'amountTo': amount_empty,
+            'useAbsoluteSearch': 'false',
+            'currency': '',
+            'categories': '',
+            'operationTypes': '',
+            'searchText': '',
+            'dateFrom': local_midnight_to_utc(start_date),
+            'dateTo': local_midnight_to_utc(end_date),
+            'standingOrderId': '',
+            'showDebitTransactionTypes': 'false',
+            'showCreditTransactionTypes': 'false',
+            'showIrrelevantTransactions': 'true',
+            'showSavingsAndInvestments': 'true',
+            'saveShowIrrelevantTransactions': 'false',
+            'saveShowSavingsAndInvestments': 'false',
+            'selectedSuggestionId': '',
+            'selectedSuggestionType': '',
+            'showUncategorizedTransactions': 'false',
+            'debitCardNumber': '',
+            'counterpartyAccountNumbers': '',
+            'sortingOrder': 'ByDate',
+        }
+    return urllib.parse.urlencode(params)
+
+
+def get_external_accounts_for_history(login_info):
+    headers = {
+        **login_info['headers'],
+        **header_xhr,
+        **header_accept_json,
+    }
+    urls = (
+        f'{root_url}/api/AccountsAggregation/Accounts?showUnProccessedAccounts=false',
+        f'{root_url}/api/AccountsAggregation/Accounts?showUnProcessedAccounts=false',
+    )
+    accounts_doc = None
+    for url in urls:
+        doc = download(urllib.request.Request(url, headers=headers, method='GET'), ignore_errors=(404, 405))
+        if doc['status'] in (404, 405):
+            continue
+        accounts_doc = doc
+        break
+    if accounts_doc is None or not (200 <= accounts_doc['status'] < 300):
+        return []
+
+    data = decode_json(accounts_doc['content'], 'history.external.accounts')
+    payload = data.get('payload')
+    if not isinstance(payload, list):
+        return []
+
+    out = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        account_id = str(item.get('accountId', '')).strip()
+        if not uuid_re.fullmatch(account_id):
+            continue
+        account_no = normalize_account_number(item.get('accountNumber'))
+        if not account_no:
+            continue
+        bank = item.get('bank')
+        bank_name = bank.get('name') if isinstance(bank, dict) else None
+        source = normalize_external_source_name(pick(bank_name, item.get('bankId'), 'external'))
+        out.append(
+            {
+                'account_id': account_id,
+                'account_number': account_no,
+                'source': source,
+                'account_name': sanitize_field(pick(item.get('externalAccountName'), item.get('accountName'), '')),
+            }
+        )
+    return out
+
+
+def get_external_history_rows(login_info, start_date, end_date, with_id=False):
+    headers = {
+        **login_info['headers'],
+        **header_xhr,
+        **header_accept_json,
+    }
+    rows = []
+    for account in get_external_accounts_for_history(login_info):
+        account_id = account['account_id']
+        account_no = account['account_number']
+        source = account['source']
+        account_name = account['account_name']
+
+        status_url = f'{root_url}/api/AccountsAggregation/Transactions/Status/{account_id}'
+        download(urllib.request.Request(status_url, headers=headers, method='GET'), ignore_errors=(400, 404, 405, 422))
+
+        query = urllib.parse.urlencode(
+            {
+                'transactionStatuses': 'DONE',
+                'amountMin': '',
+                'amountMax': '',
+                'transactionDateFrom': local_midnight_to_utc(start_date),
+                'transactionDateTo': local_midnight_to_utc(end_date),
+                'category': 'UNDEFINED',
+                'text': '',
+                'counterPartyAccountNumbers': '',
+            }
+        )
+        list_url = f'{root_url}/api/AccountsAggregation/Transactions/OfflineList/{account_id}?{query}'
+        doc = download(urllib.request.Request(list_url, headers=headers, method='GET'), ignore_errors=(400, 404, 405, 422))
+        if not (200 <= doc['status'] < 300):
+            continue
+
+        data = decode_json(doc['content'], f'history.external.offline-list.{account_id}')
+        payload = data.get('payload')
+        txs = payload.get('transactions') if isinstance(payload, dict) else None
+        if not isinstance(txs, list):
+            continue
+
+        for tx in txs:
+            if not isinstance(tx, dict):
+                continue
+            if str(tx.get('transactionStatus', '')).upper() != 'DONE':
+                continue
+            op_id = sanitize_field(tx.get('id', ''))
+            tx_date = sanitize_field(
+                pick(
+                    tx.get('bookingDate'),
+                    timestamp_to_date(tx.get('bookingDate')),
+                    tx.get('tradeDate'),
+                    timestamp_to_date(tx.get('tradeDate')),
+                    '',
+                )
+            )
+            op_type = sanitize_field(pick(tx.get('transactionCategory'), tx.get('transactionStatus'), 'EXTERNAL'))
+            amount = format_money(tx.get('amount'), tx.get('currency'))
+            balance = format_money(tx.get('postTransactionBalance'), tx.get('currency')) if tx.get('postTransactionBalance') is not None else ''
+            description = sanitize_field(tx.get('description', ''))
+            comment = sanitize_field(pick(tx.get('bankName'), source, account_name, 'external'))
+
+            row = [tx_date, account_no, op_id, op_type, amount, balance, description, comment]
+            rows.append(';'.join(row))
+    return rows
+
+
+def do_history(login_info, start_date=None, end_date=None, with_id=False, include_all=False):
+    headers = {
+        **header_xhr,
+        'X-Tab-Id': login_info['headers'].get('X-Tab-Id', ''),
+        'Referer': f'{root_url}/history',
+        'Accept': '*/*',
+    }
+
+    mode_doc = download(urllib.request.Request(f'{base_url}/Pfm/HistoryApi/GetHistoryModeInfo?shouldOverWriteFilters=true', headers=headers))
+    mode = decode_json(mode_doc['content'], 'history.mode-info')
+    min_date = timestamp_to_date(mode.get('pfmStartDate'))
+    if not min_date:
+        fail('history.mode-info: missing pfmStartDate', code=3)
+    max_date = http_date_to_local_ymd(mode_doc['headers'].get('Date') if hasattr(mode_doc['headers'], 'get') else '')
+
+    if start_date is None and end_date is None:
+        end_date = max_date
+        start_date = shift_ymd(end_date, -60)
+        warning('history: default range is last 60 days; use --from/--to for full history')
+    else:
+        if start_date is None:
+            end_date = parse_ymd_date_or_fail(end_date, 'history.to')
+            start_date = shift_ymd(end_date, -60)
+        else:
+            start_date = parse_ymd_date_or_fail(start_date, 'history.from')
+        if end_date is None:
+            end_date = max_date
+        else:
+            end_date = parse_ymd_date_or_fail(end_date, 'history.to')
+
+    if start_date < min_date:
+        start_date = min_date
+    if end_date > max_date:
+        end_date = max_date
+    if start_date > end_date:
+        fail('history: start date is after end date')
+
+    pfm_doc = download(urllib.request.Request(f'{base_url}/Pfm/HistoryApi/GetPfmInitialData?shouldOverWriteFilters=true', headers=headers))
+    pfm = decode_json(pfm_doc['content'], 'history.pfm-data')
+    products = pfm.get('pfmProducts')
+    if not isinstance(products, list):
+        fail('history.pfm-data: missing pfmProducts', code=3)
+
+    product_map = {}
+    for p in products:
+        if not isinstance(p, dict):
+            continue
+        contract = normalize_account_number(p.get('contractNumber'))
+        pid = str(p.get('id', '')).strip()
+        if contract and pid:
+            product_map[contract] = pid
+
+    visible_account_numbers = {a['number'] for a in get_main_accounts(login_info, context='history.accounts')}
+    account_numbers = [n for n in sorted(product_map.keys()) if n in visible_account_numbers]
+    if not account_numbers:
+        account_numbers = sorted(product_map.keys())
+
+    for account_no in account_numbers:
+        query_variants = (
+            build_history_query(product_map[account_no], start_date, end_date, compact=False, null_amount=False),
+            build_history_query(product_map[account_no], start_date, end_date, compact=False, null_amount=True),
+            build_history_query(product_map[account_no], start_date, end_date, compact=True),
+        )
+        ops_doc = None
+        for query in query_variants:
+            first_url = f'{base_url}/Pfm/HistoryApi/GetOperationsPfm?{query}'
+            doc = download(urllib.request.Request(first_url, headers=headers), ignore_errors=(519,))
+            if doc['status'] == 519:
+                continue
+            ops_doc = doc
+            break
+        if ops_doc is None:
+            warning(f'history: skipping account {account_no} (HTTP 519)')
+            continue
+
+        while True:
+            ops_data = decode_json(ops_doc['content'], 'history.ops')
+            txs = ops_data.get('transactions')
+            if not isinstance(txs, list):
+                fail('history.ops: missing transactions', code=3)
+            for tx in txs:
+                if not isinstance(tx, dict):
+                    continue
+                op_id = sanitize_field(tx.get('operationNumber', ''))
+                op_type = sanitize_field(tx.get('operationType', ''))
+                tx_date = sanitize_field(timestamp_to_date(tx.get('transactionDate')) or tx.get('transactionDate', ''))
+                amount = format_money(tx.get('amount'), tx.get('currency'))
+                balance = format_money(tx.get('balance'), tx.get('currency')) if tx.get('balance') is not None else ''
+                description = sanitize_field(tx.get('description', ''))
+                comment = sanitize_field(tx.get('comment', ''))
+                row = [tx_date, account_no, op_id, op_type, amount, balance, description, comment]
+                print(';'.join(row))
+            next_url = ops_data.get('nextPageUrl')
+            if not next_url:
+                break
+            if not str(next_url).startswith('Pfm/HistoryApi/GetOperationsPfm?'):
+                break
+            paged_url = f'{base_url}/{next_url}'
+            ops_doc = download(urllib.request.Request(paged_url, headers=headers), ignore_errors=(519,))
+            if ops_doc['status'] == 519:
+                warning(f'history: paging failed for account {account_no} (HTTP 519)')
+                break
+
+    if include_all:
+        for row in get_external_history_rows(login_info, start_date, end_date, with_id=with_id):
+            print(row)
 
 
 def do_2fa(register_device=None):
@@ -955,30 +1279,9 @@ def print_account_row(account):
 
 
 def do_list(login_info):
-    headers = {
-        **login_info['headers'],
-        **header_accept_json,
-        'Content-Type': 'application/json; charset=UTF-8',
-    }
-
-    req = urllib.request.Request(
-        f'{base_url}/MyDesktop/Desktop/GetAccountsList',
-        data=b'{}',
-        headers=headers,
-        method='POST',
-    )
-    doc = download(req)
-    data = decode_json(doc['content'], 'list.json')
-
-    raw_accounts = data.get('accountDetailsList')
-    if not isinstance(raw_accounts, list):
-        fail('list: accountDetailsList missing', code=3)
-
+    main_accounts = get_main_accounts(login_info, context='list.json')
     result = []
-    for raw in raw_accounts:
-        account = normalize_mbank_account(raw)
-        if not account:
-            continue
+    for account in main_accounts:
         result.append({'name': account['name'], 'number': account['number'], 'source': account['source']})
         print_account_row(account)
 
@@ -1176,6 +1479,17 @@ def main():
     if args.command == 'list':
         login_info = do_login()
         do_list(login_info)
+        return
+
+    if args.command == 'history':
+        login_info = do_login()
+        do_history(
+            login_info,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            with_id=args.with_id,
+            include_all=args.all,
+        )
         return
 
     if args.command == 'logout':

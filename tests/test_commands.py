@@ -45,6 +45,13 @@ class TestCommands(unittest.TestCase):
         self.assertEqual(args.command, 'register-device')
         self.assertEqual(args.name, 'CLI')
 
+    def test_parse_args_history_all(self):
+        with mock.patch.object(self.m.sys, 'argv', ['mbank-cli', 'history', '--all', '--with-id']):
+            args = self.m.parse_args()
+        self.assertEqual(args.command, 'history')
+        self.assertTrue(args.all)
+        self.assertTrue(args.with_id)
+
     def test_parse_args_debug_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
             debug_dir = f'{tmp}/dbg'
@@ -196,6 +203,25 @@ class TestCommands(unittest.TestCase):
         init.assert_called_once()
         login.assert_called_once_with()
         do_list.assert_called_once_with({'headers': {}})
+
+    def test_main_dispatch_history_all(self):
+        args = SimpleNamespace(command='history', start_date='2026-01-01', end_date='2026-02-01', with_id=True, all=True)
+        with mock.patch.object(self.m, 'parse_args', return_value=args), mock.patch.object(
+            self.m, 'initialize'
+        ) as init, mock.patch.object(self.m, 'do_login', return_value={'headers': {}}) as login, mock.patch.object(
+            self.m, 'do_history'
+        ) as history:
+            self.m.main()
+
+        init.assert_called_once()
+        login.assert_called_once_with()
+        history.assert_called_once_with(
+            {'headers': {}},
+            start_date='2026-01-01',
+            end_date='2026-02-01',
+            with_id=True,
+            include_all=True,
+        )
 
     def test_main_dispatch_register_device(self):
         args = SimpleNamespace(command='register-device', name='Laptop')

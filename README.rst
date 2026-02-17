@@ -13,6 +13,7 @@ Status
 Aktualnie wspierane są kluczowe komendy:
 
 - ``list``
+- ``history``
 - ``logout``
 - ``register-device``
 - ``activate-profile``
@@ -71,6 +72,23 @@ Lista kont:
 .. code-block:: bash
 
    python3 mbank-cli.py list
+
+Historia operacji:
+
+.. code-block:: bash
+
+   python3 mbank-cli.py history
+   python3 mbank-cli.py history --from 2026-01-01 --to 2026-01-31
+   python3 mbank-cli.py history --all
+
+``history --all`` dodaje historię kont zewnętrznych (Accounts Aggregation)
+z filtrem statusu transakcji ``DONE``.
+
+Format wiersza ``history`` (ID transakcji jest zawsze):
+
+.. code-block:: text
+
+   Data;NumerKonta;TransactionId;Typ;Kwota;Saldo;Opis;Komentarz
 
 Format wiersza ``list``:
 
