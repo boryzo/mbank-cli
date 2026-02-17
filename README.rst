@@ -90,12 +90,18 @@ Debug
 - ``--debug DIR``: pełny dump HTTP (request/response/headers/body) do pliku
   ``DIR/log``.
 
-Testy (tylko unit)
-------------------
+Testy
+-----
 
-Projekt używa wyłącznie testów jednostkowych (bez testów online/integracyjnych).
+Projekt ma testy offline, bez logowania do prawdziwego mBanku:
 
-Uruchomienie:
+- unit: funkcje pomocnicze i logika parsowania/normalizacji,
+- contract: fixture JSON/HTML z formatami odpowiedzi,
+- integration (offline): lokalny fake server HTTP i pełny przepływ wybranych
+  komend,
+- CLI black-box: testy ``subprocess`` na realnym wywołaniu skryptu.
+
+Uruchomienie pełnego zestawu:
 
 .. code-block:: bash
 

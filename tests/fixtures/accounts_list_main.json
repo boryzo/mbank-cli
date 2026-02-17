@@ -1,0 +1,26 @@
+{
+  "accountDetailsList": [
+    {
+      "ProductName": "eKonto",
+      "SubTitle": "osobiste",
+      "AccountNumber": "PL 12 1140 2004 0000 3102 1234 5678",
+      "Balance": {
+        "amount": "100.01",
+        "currency": "PLN"
+      },
+      "AvailableBalance": {
+        "amount": "90.00",
+        "currency": "PLN"
+      },
+      "Currency": "PLN"
+    },
+    {
+      "ProductName": "mSaver",
+      "SubTitle": "",
+      "AccountNumber": "PL 98 1140 2004 0000 3202 9999 8888",
+      "Balance": "200,50",
+      "AvailableBalance": "200,50",
+      "Currency": "PLN"
+    }
+  ]
+}
