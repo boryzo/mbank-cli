@@ -11,27 +11,24 @@ import locale
 import os
 import re
 import ssl
+import subprocess
 import sys
 import time
-import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
 
 opt_verbose = False
 opt_debug_dir = None
-opt_debug_interactive = False
-
-ua = None
-global_config = None
-
-mbank_host = None
-root_url = None
-base_url = None
-
 opt_config = None
 opt_cookie_jar = None
+
+ua = None
+global_config = {}
+
+mbank_host = ''
+root_url = ''
+base_url = ''
 
 browser_user_agent = 'Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128'
 browser_name = 'Firefox'
@@ -44,24 +41,15 @@ known_countries = sorted(country_to_language.keys())
 
 header_xhr = {'X-Requested-With': 'XMLHttpRequest'}
 header_accept_json = {'Accept': 'application/json, text/javascript, */*; q=0.01'}
-
-account_number_re = re.compile(r'''\d{2}(?:[ ]\d{4}){6}|CZ\d{2}(?:[ ]\d{4}){5}|SK\d{2}(?:[ ]\d{4}){5}|(?:\d{1,6}-)?\d{2,10}/\d{4}''', re.VERBOSE)
 uuid_re = re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
 
 
-def write_log(msg):
-    if not opt_debug_dir:
-        return
-    path = os.path.join(opt_debug_dir, 'log')
-    with open(path, 'a', encoding='utf-8') as f:
-        f.write(msg + '\n')
-
-
 def debug(msg):
-    msg = f'* {msg}'
-    write_log(msg)
-    if opt_verbose:
-        print(msg, file=sys.stderr)
+    if not opt_verbose:
+        return
+    line = f'* {msg}'
+    write_log(line)
+    print(line, file=sys.stderr)
 
 
 def warning(msg):
@@ -71,158 +59,78 @@ def warning(msg):
     print(f'mbank-cli: {msg}', file=sys.stderr)
 
 
-def user_error(msg):
+def fail(msg, code=1):
     warning(msg)
-    sys.exit(1)
+    sys.exit(code)
 
 
-def server_error(msg=None):
+def write_log(msg):
+    if not opt_debug_dir:
+        return
+    path = os.path.join(opt_debug_dir, 'log')
+    try:
+        with open(path, 'a', encoding='utf-8') as fh:
+            fh.write(str(msg) + '\n')
+    except OSError:
+        pass
+
+
+def log_http(request, response=None, content=None, error=None):
+    if not opt_debug_dir:
+        return
+    lines = [f'HTTP {request.get_method()} {request.full_url}']
+    for k, v in sorted(dict(request.header_items()).items()):
+        lines.append(f'> {k}: {v}')
+    data = getattr(request, 'data', None)
+    if data:
+        try:
+            body = data.decode('utf-8', errors='replace')
+        except Exception:
+            body = repr(data)
+        lines.append('>')
+        lines.append(body)
+    if response is not None:
+        lines.append(f'< STATUS {getattr(response, "status", "?")}')
+        try:
+            headers = dict(response.headers.items())
+        except Exception:
+            headers = {}
+        for k, v in sorted(headers.items()):
+            lines.append(f'< {k}: {v}')
+    if error is not None:
+        lines.append(f'< ERROR {error}')
+    if content is not None:
+        lines.append('<')
+        lines.append(content)
+    lines.append('-' * 80)
+    write_log('\n'.join(lines))
+
+
+def server_fail(msg=None):
     if msg:
         warning(msg)
     sys.exit(2)
 
 
-def scraping_error(msg):
-    write_log(f'Scraping error: {msg}')
-    traceback.print_stack()
-    print(f'Scraping error: {msg}', file=sys.stderr)
-    sys.exit(3)
-
-
-def internal_error(msg):
-    write_log(f'Internal error: {msg}')
-    traceback.print_stack()
-    print(f'Internal error: {msg}', file=sys.stderr)
-    sys.exit(255)
-
-
-def os_error(msg):
-    write_log(msg)
-    traceback.print_stack()
-    print(msg, file=sys.stderr)
-    sys.exit(4)
-
-
-def first_defined(*vals):
-    for v in vals:
-        if v is not None:
-            return v
+def pick(*values):
+    for v in values:
+        if v is None:
+            continue
+        if isinstance(v, str) and v.strip() == '':
+            continue
+        return v
     return None
 
 
-def unicode_display(s):
-    if s is None:
-        return ''
-    return str(s)
-
-
-def quote(x):
-    if isinstance(x, re.Pattern):
-        p = x.pattern.replace('/', r'\/')
-        return f'/{p}/'
-    return json.dumps(x, ensure_ascii=True)
-
-
-def match(text, pattern, context=None):
-    if isinstance(pattern, str):
-        pattern = re.compile(re.escape(pattern))
-    if not isinstance(pattern, re.Pattern):
-        internal_error('match(): invalid pattern')
-    if isinstance(text, (int, float)) and not isinstance(text, bool):
-        text = str(text)
-    if not isinstance(text, str):
-        scraping_error(f'{context}: {quote(text)} is not a string')
-    if not pattern.fullmatch(text):
-        scraping_error(f'{context}: {quote(text)} does not match {quote(pattern)}')
-    return text
-
-
-def no_match(text, context=None):
-    return match(text, re.compile(r'(?!)'), context=context)
-
-
-def check_type(obj, template, context=None):
-    expected = type(template)
-    if type(obj) is not expected:
-        if expected is dict:
-            scraping_error(f'{context}: not an object')
-        if expected is list:
-            scraping_error(f'{context}: not an array')
-        internal_error('check_type(): unknown template type')
-    return obj
-
-
-def parse_uuid(s):
-    if not isinstance(s, str):
-        return None
-    return s if uuid_re.fullmatch(s) else None
-
-
-def match_uuid(s, context=None):
-    v = parse_uuid(s)
-    if v:
-        return v
-    return no_match(s, context=context)
-
-
-def timestamp_to_date(ts, time_must_be=None):
-    if not ts:
-        return None
-    m = re.match(r'^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2}(?:\.\d+)?)(?:[+-]\d{2}:\d{2})?$', str(ts))
-    if not m:
-        return None
-    d, t = m.groups()
-    if time_must_be == 0 and not re.fullmatch(r'[0:.]+', t):
-        return None
-    try:
-        if datetime.strptime(d, '%Y-%m-%d').strftime('%Y-%m-%d') != d:
-            return None
-    except Exception:
-        return None
-    return d
-
-
-def format_account_number(number):
-    if number is None:
-        return ''
-    return str(number).replace('PL', '', 1).replace(' ', '')
-
-
-def format_money(number, currency):
-    if number is None:
-        return ''
-    if currency is None:
-        return ''
-    currency = str(currency).strip()
-    if not re.fullmatch(r'[A-Z]{3}', currency):
-        return ''
-    txt = str(number).replace('\xa0', ' ').replace(' ', '').replace(',', '.')
-    if not re.fullmatch(r'-?\d+(?:\.\d+)?', txt):
-        return ''
-    try:
-        return f'{float(txt):.2f} {currency}'
-    except Exception:
-        return ''
-
-
-def get_tz_country_guess():
-    try:
-        loc = locale.getlocale()[0] or ''
-    except Exception:
-        return None
-    if '_' not in loc:
-        return None
-    cc = loc.split('_', 1)[1].lower()
-    return cc if cc in country_to_language else None
-
-
 def expand_tilde(path):
-    return os.path.expanduser(path) if path.startswith('~') else path
+    return os.path.expanduser(path) if path and path.startswith('~') else path
 
 
 def unexpand_tilde(path):
     home = os.path.expanduser('~')
-    return '~' + path[len(home):] if path.startswith(home) else path
+    if path.startswith(home):
+        return '~' + path[len(home):]
+    return path
 
 
 def xdg_config_home():
@@ -237,26 +145,24 @@ def makedirs(path):
     try:
         os.makedirs(path, exist_ok=True)
     except OSError as e:
-        os_error(f'{path}: {e}')
+        fail(f'{path}: {e}', code=4)
 
 
 def read_config(path):
     try:
         with open(path, 'r', encoding='utf-8') as fh:
-            return _read_config(fh, path)
+            lines = fh.readlines()
     except OSError as e:
-        os_error(f'{path}: {e}')
+        fail(f'{path}: {e}', code=4)
 
-
-def _read_config(fh, path):
     cfg = {'__path__': path}
-    for line in fh:
+    for line in lines:
         line = line.rstrip('\n')
         if re.fullmatch(r'(?:#.*)?\s*', line):
             continue
         m = re.match(r'^\s*([\w-]+)\s+(.*\S)\s*$', line)
         if not m:
-            config_error(f'syntax error: {line}', config=path)
+            fail(f'{path}: syntax error: {line}')
         k, v = m.groups()
         k = k.lower()
         v = v.strip()
@@ -266,24 +172,15 @@ def _read_config(fh, path):
     return cfg
 
 
-def get_config_var(name, default=None):
+def cfg_get(name, default=None):
     return global_config.get(name, default)
 
 
-def config_error(msg, config=None):
-    cfg = config if config is not None else global_config
-    if isinstance(cfg, dict):
-        path = cfg.get('__path__', 'config')
-    else:
-        path = cfg
-    user_error(f'{path}: {msg}')
-
-
-def _decode_http_content(raw, headers):
-    enc = headers.get('Content-Encoding', '')
-    if enc == 'gzip':
+def decode_http_content(raw, headers):
+    encoding = headers.get('Content-Encoding', '')
+    if encoding == 'gzip':
         raw = gzip.decompress(raw)
-    elif enc == 'deflate':
+    elif encoding == 'deflate':
         import zlib
         raw = zlib.decompress(raw)
     return raw.decode('utf-8', errors='replace').replace('\r', '')
@@ -291,9 +188,10 @@ def _decode_http_content(raw, headers):
 
 def http_init(cookie_jar_path, ca_path=None):
     global ua
-    for k in list(os.environ.keys()):
-        if k.startswith('HTTPS_'):
-            del os.environ[k]
+
+    for key in list(os.environ.keys()):
+        if key.startswith('HTTPS_'):
+            del os.environ[key]
 
     ctx = ssl.create_default_context()
     ctx.check_hostname = True
@@ -325,87 +223,115 @@ def http_init(cookie_jar_path, ca_path=None):
     ua = opener
 
 
-def download(request, ignore_errors=None):
-    if ignore_errors is None:
-        ignore_errors = []
-
+def download(request, ignore_errors=()):
     method = request.get_method()
     url = request.full_url
     debug(f'{method} {url}')
 
-    if opt_debug_interactive:
-        ok = input(f'Proceed {method} {url}? [y] ') or 'y'
-        if ok != 'y':
-            user_error('aborted by user')
-
     try:
-        resp = ua.open(request, timeout=60)
-        content = _decode_http_content(resp.read(), resp.headers)
-        return {'response': resp, 'content': content, 'url': resp.geturl()}
+        response = ua.open(request, timeout=60)
+        content = decode_http_content(response.read(), response.headers)
+        log_http(request, response=response, content=content)
+        return {
+            'status': response.status,
+            'url': response.geturl(),
+            'headers': response.headers,
+            'content': content,
+            'response': response,
+        }
     except urllib.error.HTTPError as e:
         if e.code in ignore_errors:
             try:
-                content = _decode_http_content(e.read(), e.headers)
+                content = decode_http_content(e.read(), e.headers)
             except Exception:
                 content = ''
-            return {'response': e, 'content': content, 'url': url}
-        msg = f'HTTP error {e.code} on <{method} {url}>'
-        write_log(msg)
-        traceback.print_stack()
-        print(msg, file=sys.stderr)
-        server_error()
+            log_http(request, response=e, content=content)
+            return {
+                'status': e.code,
+                'url': url,
+                'headers': e.headers,
+                'content': content,
+                'response': e,
+            }
+        log_http(request, response=e, error=f'HTTPError {e.code}')
+        server_fail(f'HTTP error {e.code} on <{method} {url}>')
+    except urllib.error.URLError as e:
+        reason = getattr(e, 'reason', e)
+        log_http(request, error=f'URLError {reason}')
+        server_fail(f'HTTP error on <{method} {url}>: {reason}')
 
 
-def simple_download(request):
+def decode_json(text, context):
     try:
-        return ua.open(request, timeout=60)
-    except urllib.error.HTTPError as e:
-        msg = f'HTTP error {e.code} on <{request.get_method()} {request.full_url}>'
-        write_log(msg)
-        traceback.print_stack()
-        print(msg, file=sys.stderr)
-        server_error()
-
-
-def decode_json(text, context=None, type_template=None):
-    if type_template is None:
-        type_template = {}
-    try:
-        obj = json.loads(text)
+        return json.loads(text)
     except Exception as e:
-        scraping_error(f'{context}: {e}')
-    return check_type(obj, type_template, context=context)
+        fail(f'{context}: invalid JSON ({e})', code=3)
+
+
+def parse_args():
+    global opt_verbose, opt_debug_dir, opt_config, opt_cookie_jar
+
+    parser = argparse.ArgumentParser(prog='mbank-cli')
+    parser.add_argument('--verbose', action='store_true')
+    parser.add_argument('--debug', metavar='DIR')
+    parser.add_argument('--config', metavar='FILE')
+    parser.add_argument('--cookie-jar', metavar='FILE')
+    parser.add_argument('--version', action='version', version='mbank-cli python-port')
+
+    sub = parser.add_subparsers(dest='command')
+    sub.add_parser('list', help='List accounts')
+    sub.add_parser('logout', help='Logout')
+    p = sub.add_parser('register-device', help='Register device')
+    p.add_argument('name', nargs='?', default='CLI')
+    p = sub.add_parser('activate-profile', help='Activate profile')
+    p.add_argument('profile')
+    sub.add_parser('configure', help='Configure mbank-cli')
+
+    args = parser.parse_args()
+    if args.command is None:
+        args.command = 'list'
+
+    opt_verbose = args.verbose
+    opt_config = args.config or os.path.join(xdg_config_home(), 'mbank-cli', 'config')
+    opt_cookie_jar = args.cookie_jar
+    if args.debug:
+        if args.debug.startswith('-'):
+            fail(f'suspicious directory name for --debug: {args.debug}')
+        makedirs(args.debug)
+        opt_debug_dir = args.debug
+
+    return args
 
 
 def initialize():
     global global_config, mbank_host, root_url, base_url
 
     if not os.path.exists(opt_config):
-        user_error(
+        fail(
             f'missing configuration file: {opt_config}\n'
             'Run "mbank-cli configure" or create the configuration file manually.'
         )
 
     global_config = read_config(opt_config)
 
-    cookie_jar_path = opt_cookie_jar or get_config_var('cookiejar')
+    cookie_jar_path = opt_cookie_jar or cfg_get('cookiejar')
     if not cookie_jar_path:
-        config_error('missing cookiejar')
+        fail(f'{opt_config}: missing cookiejar')
     cookie_jar_path = expand_tilde(cookie_jar_path)
-    debug(f'cookiejar = {cookie_jar_path}')
 
-    ca_path = get_config_var('cafile')
+    ca_path = cfg_get('cafile')
     if ca_path:
         ca_path = expand_tilde(ca_path)
         if not os.path.isfile(ca_path):
-            os_error(f'{ca_path}: file not found')
+            fail(f'{ca_path}: file not found', code=4)
 
-    country = (get_config_var('country') or '').lower()
+    country = (cfg_get('country') or '').lower()
     if not country:
-        config_error('missing country')
+        fail(f'{opt_config}: missing country')
+
     lang = country_to_language.get(country)
     if not lang:
-        user_error(f"unknown country {country.upper()}, not in {', '.join(known_countries).upper()}")
+        fail(f"unknown country {country.upper()}, not in {', '.join(known_countries).upper()}")
 
     mbank_host = f'online.mbank.{country}'
     root_url = f'https://{mbank_host}'
@@ -414,125 +340,7 @@ def initialize():
     http_init(cookie_jar_path=cookie_jar_path, ca_path=ca_path)
 
 
-def parse_args():
-    global opt_verbose, opt_debug_dir, opt_debug_interactive, opt_config, opt_cookie_jar
-
-    parser = argparse.ArgumentParser(prog='mbank-cli', add_help=False)
-    parser.add_argument('--verbose', action='store_true')
-    parser.add_argument('--debug', metavar='DIR')
-    parser.add_argument('--debug-interactive', action='store_true')
-    parser.add_argument('--config', metavar='FILE')
-    parser.add_argument('--cookie-jar', metavar='FILE')
-    parser.add_argument('-h', '--help', action='store_true')
-    parser.add_argument('--version', action='store_true')
-    parser.add_argument('command', nargs='?')
-    parser.add_argument('args', nargs='*')
-
-    try:
-        args = parser.parse_args()
-    except SystemExit:
-        user_error('Invalid arguments')
-
-    if args.help:
-        print('''Usage: mbank-cli [OPTIONS] COMMAND [ARGS...]\n\nOptions:\n  --verbose\n  --debug DIR\n  --debug-interactive\n  --config FILE\n  --cookie-jar FILE\n  -h, --help\n  --version\n\nCommands:\n  list\n  logout\n  register-device\n  activate-profile\n  configure''')
-        sys.exit(0)
-
-    if args.version:
-        print('mbank-cli python-port')
-        sys.exit(0)
-
-    opt_verbose = args.verbose
-    opt_debug_interactive = args.debug_interactive
-    opt_config = args.config or os.path.join(xdg_config_home(), 'mbank-cli', 'config')
-    opt_cookie_jar = args.cookie_jar
-
-    if args.debug:
-        if args.debug.startswith('-'):
-            user_error(f'suspicious directory name for --debug: {args.debug}')
-        makedirs(args.debug)
-        opt_debug_dir = args.debug
-
-    return (args.command or 'list'), args.args
-
-
-def extract_js_object_assignment(content, var_name):
-    pos = content.find(var_name)
-    if pos < 0:
-        return None
-    eq = content.find('=', pos + len(var_name))
-    if eq < 0:
-        return None
-    start = content.find('{', eq + 1)
-    if start < 0:
-        return None
-
-    depth = 0
-    in_str = False
-    quote_ch = ''
-    esc = False
-    for i in range(start, len(content)):
-        ch = content[i]
-        if in_str:
-            if esc:
-                esc = False
-            elif ch == '\\':
-                esc = True
-            elif ch == quote_ch:
-                in_str = False
-            continue
-        if ch in ('"', "'"):
-            in_str = True
-            quote_ch = ch
-            continue
-        if ch == '{':
-            depth += 1
-        elif ch == '}':
-            depth -= 1
-            if depth == 0:
-                return content[start:i + 1]
-    return None
-
-
-def extract_login_profiles(page_content):
-    profiles = {'personal': [], 'business': []}
-
-    for m in re.finditer(r'<script\b[^>]*>(.*?)</script>', page_content, re.IGNORECASE | re.DOTALL):
-        payload = extract_js_object_assignment(m.group(1), 'Ebre.Venezia.ProfileData')
-        if not payload:
-            continue
-        data = decode_json(payload, context='login.profiles.json')
-        for key, value in data.items():
-            if key == 'iProfiles':
-                key = 'personal'
-            elif key == 'fProfiles':
-                key = 'business'
-            else:
-                no_match(key, context='login.profiles.key')
-
-            if not isinstance(value, dict):
-                scraping_error(f'login.profiles.{key}: not an object')
-            arr = value.get('profiles', [])
-            if not isinstance(arr, list):
-                scraping_error(f'login.profiles.{key}.profiles: not an array')
-
-            n = 0
-            for p in arr:
-                if not isinstance(p, dict):
-                    scraping_error(f'login.profiles.{key}.profile: not an object')
-                code = match(p.get('profileCode', ''), re.compile(r'.+'), context='login.profiles.profile-code')
-                profiles[key].append(code)
-                n += 1
-                name = match(p.get('firmName', ''), re.compile(r'.+'), context='login.profiles.company-name') if key == 'business' else f'{key}/{code}'
-                profiles.setdefault(name, []).append(code)
-            if n > 1:
-                profiles.pop(key, None)
-        break
-
-    return profiles
-
-
 def clear_temp_cookies():
-    debug('clearing temporary cookies')
     if ua and hasattr(ua, 'cookie_jar'):
         ua.cookie_jar.clear_session_cookies()
 
@@ -540,68 +348,169 @@ def clear_temp_cookies():
 def get_cookie(name):
     if not ua or not hasattr(ua, 'cookie_jar'):
         return None
-    out = None
     for c in ua.cookie_jar:
         if c.name != name:
             continue
         if (c.domain or '').lstrip('.') == mbank_host:
-            out = c
-    return out
+            return c
+    return None
 
 
-def unexpire_cookie(name, context=None):
+def unexpire_cookie(name, context):
     c = get_cookie(name)
     if c is None:
-        scraping_error(f'{context or "cookie"}: cookie {name} missing')
+        fail(f'{context}: missing cookie {name}', code=3)
     if c.expires is None or c.discard:
         c.expires = int(1e10)
         c.discard = False
 
 
+def match_uuid(value, context):
+    value = str(value or '')
+    if not uuid_re.fullmatch(value):
+        fail(f'{context}: invalid UUID: {value}', code=3)
+    return value
+
+
 def get_tabid():
     c = get_cookie('mBank_tabId')
     if c is None:
-        scraping_error('login.tabid')
-    return match_uuid(c.value, context='login.tabid')
+        fail('login: mBank_tabId cookie missing', code=3)
+    return match_uuid(c.value, 'login.tabid')
 
 
-def ask_sms_password(date, n, try_num):
-    if try_num == 0:
+def extract_js_object_assignment(content, var_name):
+    pos = content.find(var_name)
+    if pos < 0:
         return None
+
+    eq = content.find('=', pos + len(var_name))
+    if eq < 0:
+        return None
+
+    start = content.find('{', eq + 1)
+    if start < 0:
+        return None
+
+    depth = 0
+    in_string = False
+    quote_char = ''
+    escaped = False
+
+    for i in range(start, len(content)):
+        ch = content[i]
+
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == '\\':
+                escaped = True
+            elif ch == quote_char:
+                in_string = False
+            continue
+
+        if ch in ('"', "'"):
+            in_string = True
+            quote_char = ch
+            continue
+
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                return content[start:i + 1]
+
+    return None
+
+
+def extract_login_profiles(page_content):
+    profiles = {'personal': [], 'business': []}
+
+    scripts = re.finditer(r'<script\b[^>]*>(.*?)</script>', page_content, re.IGNORECASE | re.DOTALL)
+    for m in scripts:
+        payload = extract_js_object_assignment(m.group(1), 'Ebre.Venezia.ProfileData')
+        if not payload:
+            continue
+
+        data = decode_json(payload, 'login.profiles')
+
+        for src_key, logical_name in (('iProfiles', 'personal'), ('fProfiles', 'business')):
+            block = data.get(src_key, {})
+            if not isinstance(block, dict):
+                continue
+            arr = block.get('profiles', [])
+            if not isinstance(arr, list):
+                continue
+
+            for profile in arr:
+                if not isinstance(profile, dict):
+                    continue
+                code = str(profile.get('profileCode', '')).strip()
+                if not code:
+                    continue
+
+                profiles[logical_name].append(code)
+                if logical_name == 'business':
+                    label = str(profile.get('firmName', '')).strip() or f'business/{code}'
+                    profiles.setdefault(label, []).append(code)
+
+        if len(profiles.get('personal', [])) > 1:
+            profiles.pop('personal', None)
+        if len(profiles.get('business', [])) > 1:
+            profiles.pop('business', None)
+        break
+
+    return profiles
+
+
+def extract_csrf_token(html):
+    for m in re.finditer(r'<meta\b[^>]*>', html, re.IGNORECASE):
+        tag = m.group(0)
+        attrs = {k.lower(): v for k, v in re.findall(r'([A-Za-z_:][-A-Za-z0-9_:.]*)=["\']([^"\']*)["\']', tag)}
+        if attrs.get('name') == '__AjaxRequestVerificationToken':
+            return attrs.get('content')
+    return None
+
+
+def timestamp_to_date(ts):
+    m = re.match(r'^(\d{4}-\d{2}-\d{2})T', str(ts or ''))
+    return m.group(1) if m else ''
+
+
+def ask_sms_password(date, operation_no, try_num):
     if try_num > 1:
         print(f'(try #{try_num})', file=sys.stderr)
-    return input(f'SMS password from {date} (operation #{n}): ')
+    return input(f'SMS password from {date} (operation #{operation_no}): ')
 
 
-def do_2fa(device_to_add=None):
-    hdr = {
-        'Origin': root_url,
-        'Referer': f'{root_url}/connect/Login',
-        'Content-Type': 'application/json; charset=UTF-8',
-    }
-
-    dfp = get_config_var('dfp') or browser_dfp
+def post_json(url, payload, headers=None, ignore_errors=()):
+    hdr = {} if headers is None else dict(headers)
+    hdr['Content-Type'] = 'application/json; charset=UTF-8'
     req = urllib.request.Request(
-        f'{root_url}/signin/connect/api/sca',
-        data=json.dumps({'dfp': dfp}).encode('utf-8'),
+        url,
+        data=json.dumps(payload).encode('utf-8'),
         headers=hdr,
         method='POST',
     )
-    doc = download(req)
-    unexpire_cookie('mBank8', context='login.sca.cookie')
+    return download(req, ignore_errors=ignore_errors)
 
-    data = decode_json(doc['content'], context='login.sca')
-    sca_status = match(data.get('imsStatus', ''), re.compile(r'(Is|Not)Trusted|Suspicious'), context='login.sca.status')
-    limit_exceeded = data.get('maximumNumberOfDevicesExceeded')
-    if not isinstance(limit_exceeded, bool):
-        no_match(limit_exceeded, context='login.sca.limit')
 
-    if sca_status == 'IsTrusted':
-        if device_to_add:
-            user_error('device already registered')
-        return match_uuid(data.get('token', ''), context='login.sca.token')
+def do_2fa(register_device=None):
+    headers = {'Origin': root_url, 'Referer': f'{root_url}/connect/Login'}
+    dfp = cfg_get('dfp') or browser_dfp
 
-    mod_data = {
+    sca_doc = post_json(f'{root_url}/signin/connect/api/sca', {'dfp': dfp}, headers=headers)
+    unexpire_cookie('mBank8', 'login.sca.cookie')
+
+    sca = decode_json(sca_doc['content'], 'login.sca')
+    sca_status = str(sca.get('imsStatus', ''))
+    is_limit_exceeded = bool(sca.get('maximumNumberOfDevicesExceeded'))
+
+    if sca_status == 'IsTrusted' and not register_device:
+        return match_uuid(sca.get('token'), 'login.sca.token')
+
+    module_data = {
         'authorizationAction': 1,
         'browserName': browser_name,
         'browserVersion': browser_version,
@@ -610,217 +519,283 @@ def do_2fa(device_to_add=None):
         'dfp': dfp,
     }
 
-    if device_to_add:
+    if register_device:
         if sca_status != 'NotTrusted':
-            user_error('device already registered')
-        if limit_exceeded:
-            user_error('too many registered devices')
+            fail('device already registered')
+        if is_limit_exceeded:
+            fail('too many registered devices')
+
         while True:
-            req = urllib.request.Request(
+            uniq_doc = post_json(
                 f'{root_url}/signin/connect/api/sca/uniqueDevice',
-                data=json.dumps({'deviceName': device_to_add}).encode('utf-8'),
-                headers=hdr,
-                method='POST',
+                {'deviceName': register_device},
+                headers=headers,
             )
-            uniq = decode_json(download(req)['content'], context='login.sca.unique-dev')
+            uniq = decode_json(uniq_doc['content'], 'login.sca.unique-device')
             if uniq.get('isUnique'):
                 break
             print('Device name has been rejected. Try another one.', file=sys.stderr)
-            new_name = input('Device name: ').strip()
-            if len(new_name) > 1:
-                device_to_add = new_name
-        mod_data['authorizationAction'] = 2
-        mod_data['deviceName'] = device_to_add
+            register_device = input('Device name: ').strip()
+            if len(register_device) < 2:
+                register_device = 'CLI'
 
-    req = urllib.request.Request(
+        module_data['authorizationAction'] = 2
+        module_data['deviceName'] = register_device
+
+    init_doc = post_json(
         f'{root_url}/signin/connect/api/mediator/initialize',
-        data=json.dumps({'moduleData': mod_data, 'moduleId': 'IB20'}).encode('utf-8'),
-        headers=hdr,
-        method='POST',
+        {'moduleData': module_data, 'moduleId': 'IB20'},
+        headers=headers,
     )
-    init = decode_json(download(req)['content'], context='login.2fa.init')
+    init = decode_json(init_doc['content'], 'login.2fa.initialize')
     auth = init.get('authorizationData', {})
 
-    mode = match(auth.get('authorizationType', ''), re.compile(r'\w+'), context='login.2fa.init.auth-type')
-    auth_id = match_uuid(auth.get('authorizationId', ''), context='login.2fa.init.auth-id')
-    auth_date_raw = auth.get('authorizationDate', '')
-    auth_date = timestamp_to_date(auth_date_raw)
-    if auth_date is None:
-        scraping_error(f'login.2fa.init.operation-date: {auth_date_raw}')
-    auth_no = match(auth.get('authorizationNumber', ''), re.compile(r'\d+'), context='login.2fa.init.operation-no')
+    mode = str(auth.get('authorizationType', ''))
+    auth_id = match_uuid(auth.get('authorizationId'), 'login.2fa.authorization-id')
+    auth_date = timestamp_to_date(auth.get('authorizationDate'))
+    operation_no = str(auth.get('authorizationNumber', '')).strip()
+
+    if not auth_date or not operation_no:
+        fail('login.2fa: missing authorization date/number', code=3)
 
     if mode == 'MA':
-        print(f'Waiting for confirmation of operation no {auth_no} from {auth_date} in the mobile app...', file=sys.stderr)
+        print(
+            f'Waiting for confirmation of operation no {operation_no} from {auth_date} in the mobile app...',
+            file=sys.stderr,
+        )
+
         while True:
-            req = urllib.request.Request(
+            status_doc = post_json(
                 f'{root_url}/signin/connect/api/mediator/status',
-                data=json.dumps({'authorizationId': auth_id}).encode('utf-8'),
-                headers=hdr,
-                method='POST',
+                {'authorizationId': auth_id},
+                headers=headers,
             )
-            doc = download(req)
-            if doc['response'].status == 204:
-                status = '_'
-                data = {}
-            else:
-                data = decode_json(doc['content'], context='login.2fa.status')
-                status = data.get('authorizationStatus', '')
-            debug(f'2FA mobile auth: {status}')
-            if status == '_':
+
+            if status_doc['status'] == 204:
                 time.sleep(1)
-            elif status == 'Authorized':
-                return match_uuid((data.get('postResult') or {}).get('token', ''), context='login.2fa.status.token')
-            elif status == 'Canceled':
-                user_error('login failed: rejected mobile authentication request')
-            elif status == 'TimeOut':
-                user_error('login failed: mobile authentication request timed out')
-            else:
-                scraping_error(f'login.2fa.status.status: {status}')
+                continue
+
+            status_data = decode_json(status_doc['content'], 'login.2fa.status')
+            status = str(status_data.get('authorizationStatus', ''))
+            debug(f'2FA mobile auth: {status}')
+
+            if status == 'Authorized':
+                token = pick(
+                    (status_data.get('postResult') or {}).get('token'),
+                    status_data.get('token'),
+                )
+                return match_uuid(token, 'login.2fa.status.token')
+            if status == 'Canceled':
+                fail('login failed: rejected mobile authentication request')
+            if status == 'TimeOut':
+                fail('login failed: mobile authentication request timed out')
+
+            time.sleep(1)
 
     if mode == 'SMS':
-        i = 1
+        try_num = 1
         while True:
-            sms_password = ask_sms_password(auth_date, auth_no, i)
-            req = urllib.request.Request(
+            sms_password = ask_sms_password(auth_date, operation_no, try_num)
+            auth_doc = post_json(
                 f'{root_url}/signin/connect/api/mediator/authorize',
-                data=json.dumps({
+                {
                     'authorizationCode': sms_password,
                     'authorizationId': auth_id,
                     'authorizationType': mode,
-                }).encode('utf-8'),
-                headers=hdr,
-                method='POST',
+                },
+                headers=headers,
+                ignore_errors=(422,),
             )
-            data = decode_json(download(req, ignore_errors=[422])['content'], context='login.2fa.exec')
-            token = (data.get('postResult') or {}).get('token')
+            auth_data = decode_json(auth_doc['content'], 'login.2fa.authorize')
+            token = (auth_data.get('postResult') or {}).get('token')
             if token:
-                return match_uuid(token, context='login.2fa.exec.token')
-            if (data.get('type') or '') == 'AuthApi-SMS014':
+                return match_uuid(token, 'login.2fa.sms.token')
+            if (auth_data.get('type') or '') == 'AuthApi-SMS014':
                 print('Incorrect SMS password', file=sys.stderr)
-                i += 1
+                try_num += 1
                 continue
-            no_match(data.get('type'), context='login.2fa.exec.error')
+            fail(f"login failed: {auth_data.get('detail', auth_data.get('type', 'SMS error'))}")
 
-    no_match(mode, context='login.2fa.init.auth-mode')
+    fail(f'unsupported 2FA mode: {mode}', code=3)
+
+
+def get_password_from_config():
+    password = cfg_get('password')
+    if password:
+        return password
+
+    password_manager = cfg_get('passwordmanager')
+    if password_manager:
+        try:
+            result = subprocess.run(['sh', '-c', password_manager], capture_output=True, text=True, check=True)
+            return (result.stdout or '').split('\n')[0].strip()
+        except Exception as e:
+            fail(f'password manager failed: {e}', code=4)
+
+    if sys.stdin.isatty():
+        return getpass.getpass('Password: ')
+
+    fail(f'{opt_config}: missing password')
 
 
 def do_login(probe=False, register_device=None):
-    req = urllib.request.Request(base_url)
-    doc = download(req)
+    doc = download(urllib.request.Request(base_url))
 
     if '/Login' in doc['url']:
         if probe:
-            debug('not logged in')
             return None
 
         clear_temp_cookies()
         debug('logging in...')
 
-        lang_m = re.search(r'/(\w\w)$', base_url)
-        lang = lang_m.group(1) if lang_m else 'pl'
-
-        m = re.search(
-            rf"'/signin/connect/authorize\?ui_locales={lang}&(request_uri=urn%3aietf%3aparams%3aoauth%3arequest_uri%3a[0-9A-F]+&client_id=Ib)'",
-            doc['content'],
+        lang = base_url.rstrip('/').split('/')[-1]
+        pattern = (
+            rf"'/signin/connect/authorize\?ui_locales={lang}&"
+            r"(request_uri=urn%3aietf%3aparams%3aoauth%3arequest_uri%3a[0-9A-F]+&client_id=Ib)'"
         )
+        m = re.search(pattern, doc['content'])
         if not m:
-            scraping_error('login.return-url')
+            fail('login: cannot find return URL', code=3)
 
         return_url = m.group(1).replace('%3a', '%3A')
         return_url = f'/signin/connect/authorize/callback?{return_url}&suppressed_prompt=login'
 
-        login = get_config_var('login')
-        if not login:
-            config_error('missing login')
+        login_name = cfg_get('login')
+        if not login_name:
+            fail(f'{opt_config}: missing login')
 
-        password = get_config_var('password')
+        password = get_password_from_config()
         if not password:
-            pm = get_config_var('passwordmanager')
-            if pm:
-                import subprocess
-                try:
-                    r = subprocess.run(['sh', '-c', pm], capture_output=True, text=True, check=True)
-                    password = (r.stdout or '').split('\n')[0]
-                except Exception:
-                    os_error('password manager failed')
-            elif sys.stdin.isatty():
-                password = term_readpasswd('Password: ')
-            else:
-                config_error('missing password')
+            fail('login failed: empty password')
 
-        if not password:
-            user_error('login failed: empty password')
+        if cfg_get('smsinbox'):
+            ask_sms_password('2006-07-30', 1, 1)
 
-        if get_config_var('smsinbox'):
-            ask_sms_password('2006-07-30', 1, 0)
-
-        hdr = {'Origin': root_url, 'Referer': f'{root_url}/connect/Login', 'Content-Type': 'application/json; charset=UTF-8'}
-
-        req = urllib.request.Request(
+        headers = {'Origin': root_url, 'Referer': f'{root_url}/connect/Login'}
+        prelogin_doc = post_json(
             f'{root_url}/signin/connect/api/users/prelogin',
-            data=json.dumps({'language': lang, 'login': login, 'password': password, 'returnUrl': return_url}).encode('utf-8'),
-            headers=hdr,
-            method='POST',
+            {
+                'language': lang,
+                'login': login_name,
+                'password': password,
+                'returnUrl': return_url,
+            },
+            headers=headers,
+            ignore_errors=(422,),
         )
-        data = decode_json(download(req, ignore_errors=[422])['content'], context='login.prelogin.json')
-        if data.get('type') != 'PreLoginResponse':
-            user_error(f"login failed: {data.get('detail', '')}")
+        prelogin = decode_json(prelogin_doc['content'], 'login.prelogin')
+        if prelogin.get('type') != 'PreLoginResponse':
+            fail(f"login failed: {prelogin.get('detail', prelogin.get('title', 'unknown error'))}")
 
         token = do_2fa(register_device)
 
-        req = urllib.request.Request(
+        final_doc = post_json(
             f'{root_url}/signin/connect/api/users/finallogin',
-            data=json.dumps({'language': lang.capitalize(), 'returnUrl': return_url, 'token': token}).encode('utf-8'),
-            headers=hdr,
-            method='POST',
+            {
+                'language': lang.capitalize(),
+                'returnUrl': return_url,
+                'token': token,
+            },
+            headers=headers,
         )
-        final = decode_json(download(req)['content'], context='login.final')
-        return_url = match(final.get('returnUrl', ''), re.compile(r'/.+'), context='login.final.return-url')
+        final = decode_json(final_doc['content'], 'login.final')
+        redirect = str(final.get('returnUrl', ''))
+        if not redirect.startswith('/'):
+            fail('login.final: invalid returnUrl', code=3)
 
-        doc = download(urllib.request.Request(f'{root_url}{return_url}'))
+        download(urllib.request.Request(f'{root_url}{redirect}'))
         doc = download(urllib.request.Request(base_url))
 
     tabid = get_tabid()
-    content = doc['content']
-
-    if re.search(r'<header\b[^>]*class=["\'][^"\']*\btech-break\b', content, re.IGNORECASE):
-        server_error('service is temporarily unavailable')
-
-    csrf_token = None
-    for m in re.finditer(r'<meta\b[^>]*>', content, re.IGNORECASE):
-        tag = m.group(0)
-        name_m = re.search(r'name=["\']([^"\']+)["\']', tag, re.IGNORECASE)
-        if not name_m or name_m.group(1) != '__AjaxRequestVerificationToken':
-            continue
-        c_m = re.search(r'content=["\']([^"\']+)["\']', tag, re.IGNORECASE)
-        if c_m:
-            csrf_token = c_m.group(1)
-            break
-
+    csrf_token = extract_csrf_token(doc['content'])
     if not csrf_token or len(csrf_token) < 20:
-        scraping_error('login.csrf-token: invalid token')
+        fail('login: invalid CSRF token', code=3)
 
-    profiles = extract_login_profiles(content)
+    if re.search(r'<header\b[^>]*class=["\'][^"\']*\btech-break\b', doc['content'], re.IGNORECASE):
+        server_fail('service is temporarily unavailable')
 
-    debug('logged in')
-    headers = {'Referer': doc['url'], 'X-Tab-Id': tabid, 'X-Request-Verification-Token': csrf_token, **header_xhr}
-    return {'headers': headers, 'csrf_token': csrf_token, 'profiles': profiles, 'url': doc['url']}
+    return {
+        'url': doc['url'],
+        'csrf_token': csrf_token,
+        'profiles': extract_login_profiles(doc['content']),
+        'headers': {
+            'Referer': doc['url'],
+            'X-Tab-Id': tabid,
+            'X-Request-Verification-Token': csrf_token,
+            **header_xhr,
+        },
+    }
+
+
+def normalize_account_number(number):
+    if number is None:
+        return ''
+    value = str(number).strip().replace(' ', '')
+    if value.startswith('PL'):
+        value = value[2:]
+    return value
+
+
+def parse_amount_with_currency(value):
+    if isinstance(value, dict):
+        amount = pick(value.get('amount'), value.get('Amount'), value.get('value'), value.get('Value'))
+        currency = pick(value.get('currency'), value.get('Currency'), value.get('currencyCode'))
+        return amount, currency
+    return value, None
+
+
+def normalize_number(value):
+    if value is None:
+        return None
+    text = str(value).replace('\xa0', '').replace(' ', '').replace(',', '.').strip()
+    if not re.fullmatch(r'[-+]?\d+(?:\.\d+)?', text):
+        return None
+    return text
+
+
+def format_money(value, currency):
+    if value is None:
+        return ''
+
+    amount = normalize_number(value)
+    if amount is None:
+        return ''
+
+    currency = str(currency or '').strip().upper()
+    if not re.fullmatch(r'[A-Z]{3}', currency):
+        return ''
+
+    try:
+        return f'{float(amount):.2f} {currency}'
+    except Exception:
+        return ''
 
 
 def normalize_mbank_account(raw):
     if not isinstance(raw, dict):
-        scraping_error('list.mbank.account: not an object')
-    name = match(raw.get('ProductName', ''), re.compile(r'.+'), context='list.product-name')
-    subtitle = raw.get('SubTitle', '')
-    if subtitle:
-        name += f' - {subtitle}'
-    number = format_account_number(match(raw.get('AccountNumber', ''), account_number_re, context='list.account-number'))
+        return None
+
+    product = str(raw.get('ProductName', '')).strip()
+    if not product:
+        return None
+
+    subtitle = str(raw.get('SubTitle', '')).strip()
+    name = product if not subtitle else f'{product} - {subtitle}'
+
+    number = normalize_account_number(raw.get('AccountNumber'))
+    if not number:
+        return None
+
+    balance, balance_currency = parse_amount_with_currency(raw.get('Balance'))
+    available, available_currency = parse_amount_with_currency(raw.get('AvailableBalance'))
+    currency = pick(raw.get('Currency'), balance_currency, available_currency)
+
     return {
         'name': name,
         'number': number,
-        'balance': raw.get('Balance'),
-        'available': raw.get('AvailableBalance'),
-        'currency': first_defined(raw.get('Currency'), ''),
+        'balance': balance,
+        'available': available,
+        'currency': currency,
         'source': 'mbank',
     }
 
@@ -828,279 +803,286 @@ def normalize_mbank_account(raw):
 def normalize_external_account(raw):
     if not isinstance(raw, dict):
         return None
-    name = first_defined(raw.get('name'), raw.get('productName'), raw.get('ProductName'), raw.get('externalAccountName'), raw.get('accountTypeName'))
-    number = first_defined(raw.get('number'), raw.get('accountNumber'), raw.get('iban'), raw.get('Iban'))
+
+    name = pick(
+        raw.get('name'),
+        raw.get('accountNameClient'),
+        raw.get('accountName'),
+        raw.get('productName'),
+        raw.get('ProductName'),
+        raw.get('externalAccountName'),
+        raw.get('accountTypeName'),
+    )
+    number = pick(raw.get('number'), raw.get('accountNumber'), raw.get('iban'), raw.get('Iban'))
+
     if not name or not number:
         return None
-    source = first_defined(raw.get('bankName'), raw.get('providerName'), raw.get('provider'), 'external')
-    currency = first_defined(raw.get('currency'), raw.get('Currency'), '')
-    currency = '' if currency is None else str(currency)
-    if currency and not re.fullmatch(r'[A-Z]{3}', currency):
-        currency = ''
+
+    balance = pick(raw.get('balance'), raw.get('Balance'), raw.get('bookingBalance'))
+    available = pick(raw.get('availableBalance'), raw.get('AvailableBalance'), raw.get('available'), balance)
+
+    balance_value, balance_currency = parse_amount_with_currency(balance)
+    available_value, available_currency = parse_amount_with_currency(available)
+    currency = pick(raw.get('currency'), raw.get('Currency'), balance_currency, available_currency)
+
+    source = pick(
+        raw.get('bankName'),
+        raw.get('providerName'),
+        raw.get('provider'),
+        raw.get('institutionName'),
+        raw.get('bankId'),
+        'external',
+    )
+
     return {
         'name': str(name),
-        'number': format_account_number(str(number)),
-        'balance': first_defined(raw.get('balance'), raw.get('Balance')),
-        'available': first_defined(raw.get('availableBalance'), raw.get('AvailableBalance')),
-        'currency': currency,
-        'source': str(source) if source else 'external',
+        'number': normalize_account_number(number),
+        'balance': balance_value,
+        'available': available_value,
+        'currency': str(currency or '').upper(),
+        'source': str(source),
     }
 
 
-def parse_offline_accounts(text):
-    try:
-        data = json.loads(text)
-    except Exception:
-        return []
-
-    if isinstance(data, list):
-        account_list = data
-    elif isinstance(data, dict):
-        account_list = first_defined(data.get('payload'), data.get('accounts'), data.get('Accounts'), [])
-    else:
-        return []
-
-    if not isinstance(account_list, list):
-        return []
-
-    out = []
-    for raw in account_list:
-        n = normalize_external_account(raw)
-        if n is not None:
-            out.append(n)
-    return out
+def iter_dict_nodes(value):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from iter_dict_nodes(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from iter_dict_nodes(child)
 
 
 def fetch_offline_accounts(login_info):
     url = f'{root_url}/api/AccountsAggregation/Accounts/accounts/Offline'
     headers = {**login_info['headers'], **header_accept_json}
 
+    docs = []
     try:
-        req = urllib.request.Request(url, data=json.dumps({}).encode('utf-8'), headers=headers, method='POST')
-        doc = download(req, ignore_errors=[404, 405])
-        if doc['response'].status in (404, 405):
-            doc = download(urllib.request.Request(url, headers=headers), ignore_errors=[404, 405])
-            if doc['response'].status in (404, 405):
-                return []
-        if 200 <= doc['response'].status < 300:
-            return parse_offline_accounts(doc['content'])
+        docs.append(post_json(url, {}, headers=headers, ignore_errors=(404, 405)))
     except Exception:
         pass
-    return []
+
+    if not docs or docs[-1]['status'] in (404, 405):
+        get_req = urllib.request.Request(url, headers=headers, method='GET')
+        docs.append(download(get_req, ignore_errors=(404, 405)))
+
+    doc = docs[-1]
+    if not (200 <= doc['status'] < 300):
+        return []
+
+    data = decode_json(doc['content'], 'list.external')
+
+    out = []
+    seen = set()
+    for node in iter_dict_nodes(data):
+        acc = normalize_external_account(node)
+        if not acc:
+            continue
+        key = (acc['number'], acc['name'], acc['source'])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(acc)
+    return out
 
 
-def do_list(login=None, quiet=False):
-    if not login:
-        user_error('Not logged in')
+def print_account_row(account):
+    print(
+        f"{account['name']};{account['number']};"
+        f"{format_money(account.get('balance'), account.get('currency'))};"
+        f"{format_money(account.get('available'), account.get('currency'))};"
+        f"{account.get('source', '')}"
+    )
 
-    headers = {**login['headers'], **header_accept_json, 'Content-Type': 'application/json; charset=UTF-8'}
+
+def do_list(login_info):
+    headers = {
+        **login_info['headers'],
+        **header_accept_json,
+        'Content-Type': 'application/json; charset=UTF-8',
+    }
+
     req = urllib.request.Request(
         f'{base_url}/MyDesktop/Desktop/GetAccountsList',
-        data=json.dumps({}).encode('utf-8'),
+        data=b'{}',
         headers=headers,
         method='POST',
     )
-    json_data = decode_json(download(req)['content'], context='list.json')
-    accounts = check_type(json_data.get('accountDetailsList'), [], context='list.accounts')
+    doc = download(req)
+    data = decode_json(doc['content'], 'list.json')
+
+    raw_accounts = data.get('accountDetailsList')
+    if not isinstance(raw_accounts, list):
+        fail('list: accountDetailsList missing', code=3)
 
     result = []
-    for raw in accounts:
-        a = normalize_mbank_account(raw)
-        result.append({'name': a['name'], 'number': a['number'], 'source': a['source']})
-        if not quiet:
-            print(f"{unicode_display(a['name'])};{a['number']};{format_money(a.get('balance'), a.get('currency'))};{format_money(a.get('available'), a.get('currency'))};{a['source']}")
+    for raw in raw_accounts:
+        account = normalize_mbank_account(raw)
+        if not account:
+            continue
+        result.append({'name': account['name'], 'number': account['number'], 'source': account['source']})
+        print_account_row(account)
 
-    for a in fetch_offline_accounts(login):
-        result.append({'name': a['name'], 'number': a['number'], 'source': a['source']})
-        if not quiet:
-            print(f"{unicode_display(a['name'])};{a['number']};{format_money(a.get('balance'), a.get('currency'))};{format_money(a.get('available'), a.get('currency'))};{unicode_display(a['source'])}")
+    for account in fetch_offline_accounts(login_info):
+        result.append({'name': account['name'], 'number': account['number'], 'source': account['source']})
+        print_account_row(account)
 
     return result
 
 
-def do_lazy_logout(login=None):
-    if not login:
-        internal_error('do_lazy_logout(): missing login')
-
-    headers = {**login['headers'], **header_accept_json, 'Content-Type': 'application/json'}
-    req = urllib.request.Request(f'{base_url}/LoginMain/Account/LazyLogout', data=b'', headers=headers, method='POST')
-    data = decode_json(download(req)['content'], context='logout.json')
+def do_lazy_logout(login_info):
+    req = urllib.request.Request(
+        f'{base_url}/LoginMain/Account/LazyLogout',
+        data=b'',
+        headers={
+            **login_info['headers'],
+            **header_accept_json,
+            'Content-Type': 'application/json',
+        },
+        method='POST',
+    )
+    doc = download(req)
+    data = decode_json(doc['content'], 'logout.lazy')
     if not data.get('lazy'):
-        scraping_error('logout.lazy')
+        fail('logout: LazyLogout returned false', code=3)
 
 
 def do_logout(maybe=False):
-    login = do_login(probe=True)
-    if not login:
+    login_info = do_login(probe=True)
+    if not login_info:
         clear_temp_cookies()
         if maybe:
             return
-        user_error('logout: the user was not logged in')
+        fail('logout: the user was not logged in')
 
-    debug('logging out...')
-    do_lazy_logout(login=login)
-    req = urllib.request.Request(f'{base_url}/LoginMain/Account/Logout', headers={'Referer': login['url']}, method='GET')
-    simple_download(req)
-    debug('successful logout')
+    do_lazy_logout(login_info)
+    req = urllib.request.Request(
+        f'{base_url}/LoginMain/Account/Logout',
+        headers={'Referer': login_info['url']},
+        method='GET',
+    )
+    download(req)
     clear_temp_cookies()
 
 
 def cookiejar_sanity_check_for_register_device():
     if not ua or not hasattr(ua, 'cookie_jar'):
-        user_error('missing cookie jar')
+        fail('missing cookie jar')
 
-    cj = ua.cookie_jar
-    path = getattr(cj, 'filename', None) or '/dev/null'
+    cookie_jar = ua.cookie_jar
+    path = getattr(cookie_jar, 'filename', None) or '/dev/null'
+
     if path == '/dev/null':
-        user_error('/dev/null: unwritable cookie file')
-    if not hasattr(cj, 'save'):
-        user_error(f'{path}: unwritable cookie file')
+        fail('/dev/null: unwritable cookie file')
+    if not hasattr(cookie_jar, 'save'):
+        fail(f'{path}: unwritable cookie file')
+    try:
+        cookie_jar.save(ignore_discard=True, ignore_expires=True)
+    except OSError as e:
+        fail(f'{path}: {e}', code=4)
 
-    test_uuid = f'test-{int(time.time())}'
-    c = http.cookiejar.Cookie(
-        version=0, name='UUID', value=test_uuid,
-        port=None, port_specified=False,
-        domain='mbank-cli.test', domain_specified=True, domain_initial_dot=False,
-        path='/cookie-jar', path_specified=True,
-        secure=False, expires=int(time.time()) + 60, discard=False,
-        comment=None, comment_url=None, rest={}, rfc2109=False,
+
+def sort_profile_key(name):
+    name = re.sub(r'^personal(?:/?|$)', '\x00', name)
+    return '\x01' if name == 'business' else name
+
+
+def do_activate_profile(login_info, name):
+    profiles = login_info.get('profiles') or {}
+    if name not in profiles:
+        choices = ', or '.join(f'"{p}"' for p in sorted(profiles.keys(), key=sort_profile_key))
+        fail(f'activate-profile: invalid profile name (should be {choices})')
+
+    codes = profiles[name]
+    if len(codes) == 0:
+        fail(f'activate-profile: {name} profile not available')
+    if len(codes) > 1:
+        fail('activate-profile: ambiguous profile name', code=3)
+
+    code = 'I' if codes[0] == 'T' else codes[0]
+
+    req = urllib.request.Request(
+        f'{base_url}/LoginMain/Account/JsonActivateProfile',
+        data=urllib.parse.urlencode({'profileCode': code}).encode('utf-8'),
+        headers={
+            **login_info['headers'],
+            'Accept': '*/*',
+            'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        method='POST',
     )
-    cj.set_cookie(c)
+    download(req)
+    do_lazy_logout(login_info)
+
+
+def get_tz_country_guess():
     try:
-        cj.save(ignore_discard=True, ignore_expires=True)
-    except OSError as e:
-        os_error(f'{path}: {e}')
-    try:
-        cj.clear(domain='mbank-cli.test', path='/cookie-jar', name='UUID')
+        loc = locale.getlocale()[0] or ''
     except Exception:
-        pass
-    try:
-        with open(path, 'r', encoding='utf-8', errors='replace') as fh:
-            content = fh.read()
-    except OSError as e:
-        os_error(f'{path}: {e}')
-    if test_uuid not in content:
-        user_error(f'{path}: unwritable cookie file')
+        return None
+    if '_' not in loc:
+        return None
+    cc = loc.split('_', 1)[1].lower()
+    return cc if cc in country_to_language else None
 
 
 def make_config_line(key, value):
+    value = str(value)
     if re.fullmatch(r'[/\w.~-]+', value):
         return f'{key} {value}\n'
     escaped = value.replace('\\', '\\\\').replace('"', '\\"')
     return f'{key} "{escaped}"\n'
 
 
-def cmd_list(**kwargs):
-    login = kwargs.get('login')
-    if not login:
-        user_error('list: login required')
-    do_list(login=login, quiet=False)
-
-
-def cmd_logout(**kwargs):
-    do_logout()
-
-
-def cmd_register_device(**kwargs):
-    args = kwargs.get('args') or []
-    if len(args) > 1:
-        user_error('register-device: too many arguments')
-    name = args[0] if args else 'CLI'
-    cookiejar_sanity_check_for_register_device()
-    do_logout(maybe=True)
-    do_login(register_device=name)
-
-
-def cmd_activate_profile(**kwargs):
-    login_info = kwargs.get('login')
-    args = kwargs.get('args') or []
-
-    if len(args) < 1:
-        user_error('activate-profile: no profile selected')
-    if len(args) > 1:
-        user_error('activate-profile: too many arguments')
-
-    name = args[0]
-    profiles = login_info.get('profiles') or {}
-
-    def sortkey(key):
-        key = re.sub(r'^personal(?:/?|$)', '\x00', key)
-        return '\x01' if key == 'business' else key
-
-    if name not in profiles:
-        names = ', or '.join(f'"{n}"' for n in sorted(profiles.keys(), key=sortkey))
-        user_error(f'activate-profile: invalid profile name (should be {unicode_display(names)})')
-
-    codes = profiles[name]
-    if len(codes) == 0:
-        user_error(f'activate-profile: {name} profile not available')
-    if len(codes) > 1:
-        internal_error('activate-profile: ambiguous profile name')
-
-    code = 'I' if codes[0] == 'T' else codes[0]
-    debug(f'activating profile {code}...')
-
-    headers = {**login_info['headers'], 'Accept': '*/*', 'Content-Type': 'application/x-www-form-urlencoded'}
-    req = urllib.request.Request(
-        f'{base_url}/LoginMain/Account/JsonActivateProfile',
-        data=urllib.parse.urlencode({'profileCode': code}).encode('utf-8'),
-        headers=headers,
-        method='POST',
-    )
-    download(req)
-    do_lazy_logout(login=login_info)
-
-
-def cmd_configure(**kwargs):
-    config_path = kwargs.get('config_path')
-    cookie_jar_path = kwargs.get('cookie_jar_path')
-
+def cmd_configure(config_path, cookie_jar_path):
     if config_path and os.path.exists(config_path):
         overwrite = ''
         while overwrite not in ('y', 'Y', 'n', 'N'):
             overwrite = input(f'{unexpand_tilde(config_path)} already exists. Overwrite (y/n)? ') or ''
         if overwrite in ('n', 'N'):
-            user_error('Configuration cancelled')
+            fail('Configuration cancelled')
 
-    guessed = get_tz_country_guess() or ''
-    cc = ''
-    while cc not in country_to_language:
-        choices = ', or '.join(c.upper() for c in known_countries)
-        cc = (input(f'Country ({choices}): ') or guessed.upper()).lower()
+    guessed_country = (get_tz_country_guess() or '').upper()
+    country = ''
+    while country.lower() not in country_to_language:
+        options = ', or '.join(c.upper() for c in known_countries)
+        country = (input(f'Country ({options}): ') or guessed_country).upper()
 
-    login = ''
-    while not login:
-        login = input('Login: ')
+    login_name = ''
+    while not login_name:
+        login_name = input('Login: ').strip()
 
     password = ''
     while not password:
-        password = term_readpasswd('Password: ')
+        password = getpass.getpass('Password: ')
 
-    sanitized = re.sub(r'\W', '_', login)
-    default_cookie = cookie_jar_path or f"{unexpand_tilde(xdg_data_home())}/mbank-cli/{sanitized}.cookies"
+    safe_login = re.sub(r'\W', '_', login_name)
+    default_cookie_jar = cookie_jar_path or f"{unexpand_tilde(xdg_data_home())}/mbank-cli/{safe_login}.cookies"
 
-    cookie_jar_path = ''
-    while len(cookie_jar_path) <= 1:
-        cookie_jar_path = input(f'Session cookie store [{default_cookie}]: ') or default_cookie
+    cookie_store = ''
+    while len(cookie_store.strip()) <= 1:
+        cookie_store = input(f'Session cookie store [{default_cookie_jar}]: ') or default_cookie_jar
 
-    cookie_dir = os.path.dirname(expand_tilde(cookie_jar_path))
+    cookie_dir = os.path.dirname(expand_tilde(cookie_store))
     if cookie_dir and not os.path.exists(cookie_dir):
         makedirs(cookie_dir)
         print(f'Created directory for session cookie store: {unexpand_tilde(cookie_dir)}')
 
-    cfg_dir = os.path.dirname(config_path)
-    if cfg_dir:
-        makedirs(cfg_dir)
+    config_dir = os.path.dirname(config_path)
+    if config_dir:
+        makedirs(config_dir)
 
-    cfg_new = f'{config_path}.new'
+    tmp_path = f'{config_path}.new'
     try:
-        with open(cfg_new, 'w', encoding='utf-8') as fh:
-            fh.write(make_config_line('CookieJar', cookie_jar_path))
-            fh.write(make_config_line('Country', cc.upper()))
-            fh.write(make_config_line('Login', login))
+        with open(tmp_path, 'w', encoding='utf-8') as fh:
+            fh.write(make_config_line('CookieJar', cookie_store))
+            fh.write(make_config_line('Country', country.upper()))
+            fh.write(make_config_line('Login', login_name))
             fh.write(make_config_line('Password', password))
     except OSError as e:
-        os_error(f'{cfg_new}: {e}')
+        fail(f'{tmp_path}: {e}', code=4)
 
     if os.path.exists(config_path):
         try:
@@ -1110,51 +1092,51 @@ def cmd_configure(**kwargs):
             pass
 
     try:
-        os.rename(cfg_new, config_path)
-        print(f'Created configuration file: {unexpand_tilde(config_path)}')
+        os.rename(tmp_path, config_path)
     except OSError as e:
-        os_error(f'{config_path}: {e}')
+        fail(f'{config_path}: {e}', code=4)
+
+    print(f'Created configuration file: {unexpand_tilde(config_path)}')
 
 
-def term_readpasswd(prompt='Password: '):
-    return getpass.getpass(prompt)
+def save_cookie_jar():
+    if ua and hasattr(ua, 'cookie_jar') and hasattr(ua.cookie_jar, 'save'):
+        try:
+            ua.cookie_jar.save(ignore_discard=True, ignore_expires=True)
+        except Exception:
+            pass
 
 
 def main():
-    command_name, args = parse_args()
-    debug(f'selected command: {command_name}')
+    args = parse_args()
 
-    commands = {
-        'list': {'login': True},
-        'logout': {'login': False},
-        'register-device': {'login': False, 'args': True},
-        'activate-profile': {'login': True, 'args': True},
-        'configure': {'login': False, 'config': False},
-    }
+    if args.command == 'configure':
+        cmd_configure(opt_config, opt_cookie_jar)
+        return
 
-    command_info = commands.get(command_name)
-    if command_info is None:
-        user_error(f'{command_name}: invalid command')
+    initialize()
 
-    fn_name = f"cmd_{command_name.replace('-', '_')}"
-    command_func = globals().get(fn_name)
-    if not command_func:
-        user_error(f'{command_name}: invalid command')
+    if args.command == 'list':
+        login_info = do_login()
+        do_list(login_info)
+        return
 
-    cmd_options = {}
-    if command_info.get('config', True):
-        initialize()
-    else:
-        cmd_options['config_path'] = opt_config
-        cmd_options['cookie_jar_path'] = opt_cookie_jar
+    if args.command == 'logout':
+        do_logout(maybe=False)
+        return
 
-    if command_info.get('args'):
-        cmd_options['args'] = args
+    if args.command == 'register-device':
+        cookiejar_sanity_check_for_register_device()
+        do_logout(maybe=True)
+        do_login(register_device=args.name)
+        return
 
-    if command_info.get('login', True):
-        cmd_options['login'] = do_login()
+    if args.command == 'activate-profile':
+        login_info = do_login()
+        do_activate_profile(login_info, args.profile)
+        return
 
-    command_func(**cmd_options)
+    fail(f'{args.command}: invalid command')
 
 
 if __name__ == '__main__':
@@ -1163,20 +1145,5 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         print('\nInterrupted', file=sys.stderr)
         sys.exit(1)
-    except SystemExit:
-        raise
-    except Exception as e:
-        print(f'\nUnexpected error: {type(e).__name__}: {e}', file=sys.stderr)
-        if opt_verbose or opt_debug_dir:
-            print('\nFull traceback:', file=sys.stderr)
-            traceback.print_exc()
-        else:
-            print('Run with --verbose for full traceback', file=sys.stderr)
-        sys.exit(255)
     finally:
-        if ua and hasattr(ua, 'cookie_jar'):
-            try:
-                if hasattr(ua.cookie_jar, 'save'):
-                    ua.cookie_jar.save(ignore_discard=True, ignore_expires=True)
-            except Exception:
-                pass
+        save_cookie_jar()

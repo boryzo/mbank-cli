@@ -1,99 +1,30 @@
 name: CI
 permissions: {}
+
 on:
   push:
   pull_request:
-  schedule:
-  - cron: '27 4 * * *'  # 06:27 (+02:00) or 05:27 (+01:00) every day
+
 jobs:
-
-  offline:
-    if: ${{ ! github.event.schedule }}
+  unit-tests:
+    runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        os:
-        - ubuntu-22.04
-        - ubuntu-24.04
-    runs-on: ${{matrix.os}}
-    steps:
-    - uses: actions/checkout@v4
-    - name: set up APT
-      run: |
-        printf 'Apt::Install-Recommends "false";\n' | sudo tee -a /etc/apt/apt.conf
-        sudo apt-get update
-    - name: install deps
-      run: sudo apt-get install
-        libwww-perl
-        libhtml-form-perl
-        libperl-critic-perl
-        libperl-minimumversion-perl
-        libipc-run-perl
-        libnss-wrapper
-        libsocket-wrapper
-        localehelper
-        python3-docutils
-    - name: build documentation
-      run: |
-        make -C doc/
-    - name: check documentation
-      run: |
-        make -C doc/ check
-    - name: perlcritic
-      run: |
-        private/run-perlcritic
-    - name: smoke test
-      run: |
-        ./mbank-cli --version
-    - name: prepare tests
-      run: |
-        make -C t/certs/
-        perl -pi -e 's/^\s*\Kskip[(](.*),\s+\d+[)]/die($1)/' t/api-guess-country.t  # all needed locales should be available in this env
-    - name: run tests
-      run: |
-        localehelper='localehelper -x cs_CZ.UTF-8 -x pl_PL.UTF-8 -x sk_SK.UTF-8'
-        $localehelper prove --verbose
+        python-version: ['3.9', '3.10', '3.11', '3.12']
 
-  online:
-    strategy:
-      matrix:
-        os:
-        - ubuntu-22.04
-        - ubuntu-24.04
-    runs-on: ${{matrix.os}}
     steps:
-    - uses: actions/checkout@v4
-    - name: set up APT
-      run: |
-        printf 'Apt::Install-Recommends "false";\n' | sudo tee -a /etc/apt/apt.conf
-        sudo apt-get update
-    - name: install deps
-      run: sudo apt-get install
-        libwww-perl
-        libhtml-form-perl
-        libipc-run-perl
-    - name: prepare tests
-      run: |
-        # faster than building our own CA cert:
-        perl -pi -e 's#^CAfile \K<certs>/.*#/usr/share/ca-certificates/mozilla/Amazon_Root_CA_1.crt#i' t/online-bad-ca.t
-    - name: run tests
-      run: |
-        MBANK_CLI_ONLINE_TESTS=1 prove --verbose t/online-*.t
-    - name: build docs
-      run: |
-        make -C doc/
-    - name: check docs
-      run: |
-        python3 -m pip install docutils pygments
-        make -C doc/ check
-    - name: install
-      run: |
-        make install PREFIX=~/.local
-    - name: run post-install checks
-      run: |
-        cd /
-        mbank-cli --help
-        mbank-cli --version
-        export MANPATH=~/.local/share/man MANWIDTH=80
-        man 1 mbank-cli | grep -A 10 -w MBANK-CLI
+      - uses: actions/checkout@v4
 
-# vim:ts=2 sts=2 sw=2 et
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Compile check
+        run: |
+          python -m py_compile mbank-cli.py
+
+      - name: Run unit tests
+        run: |
+          python -m unittest discover -s tests -p 'test_*.py' -v
