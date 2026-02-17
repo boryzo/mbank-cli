@@ -17,6 +17,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime
 
 opt_verbose = False
 opt_debug_dir = None
@@ -30,11 +31,16 @@ mbank_host = ''
 root_url = ''
 base_url = ''
 
-browser_user_agent = 'Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128'
-browser_name = 'Firefox'
-browser_version = '128'
+DEFAULT_BROWSER_USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128'
+DEFAULT_BROWSER_NAME = 'Firefox'
+DEFAULT_BROWSER_VERSION = '128'
 # Static value copied from Perl original.
-browser_dfp = 'eJyFkT1MFEEUx/dm/NhsUJcj4PmZDYUxJOgFDSEkhg89UDmQ4AfEZpzdnbubcXdnM7MHh9XaGSs7LCwsKYkVJYUFhSaUlMTExMpYUFyns3u35AiiL9ndt//fe/PmvWf0Gl1lGtQbVmNkGA3fzsOnczMFLX9NbxrmPiw0DWsfXm8axX04mi96OHClg0MyGArqY7F68YQBSNA/pX/eBXmdNEKPOjQqAAsM6DIk+CURspgb0UqasvuxOR/rS99+ty334sOB63/9Uh4buDOudcUqckv7v8VHlCFj/t6U9YySFSKGuu/WBPeJ1SH1pBKt+53ihVnqCC55JbJKbvVw/CKxZ2hk2XXqRYM0SNioNv56be3TmYendM3UCtoCnLs5kb6e543Ts/wV9TyczxxbY30Tc9PlEqKBjHDgEBdhIfCqZGZp6QmyPRK4yKeBjxvsUqI43OMC2fVKhQhUw14FVTyOI3YuganbSmJnU0HgKnJJGNVYX/Iva9hVeRFpRHVBkMddpqf6wvQku5x4GXK4HwoiJeUBssPIOZ6KqqJXO2lFjUNVwQGVPBI8pA7re1R6jIhHfBJEqleXNFCdBhHrTfSKzZFQd1Y5Pg19HLJCIicDcbFwVQOCLuOILhPJuhNyUChtvXBEQh4NCBatqhnpGNaVv+tZ2vkELxOhIlrbQNxmxFGVFkuT0+XDO2ifmJHWXNQas+OxTIZ3LCaKHp8sbync/0+MpKjarKcVk646wyzfFgVead9WZprHZbLFIAkVD9aBvgH0TaBvAX0bFHaAtgticw+YP9TnF9jLNYEew9h8A/V30HwP9Y8wBuswtwFzmzC3Bce2YWztqOdt7uT3n3Dzxh8LG3RL'
+DEFAULT_BROWSER_DFP = 'eJyFkT1MFEEUx/dm/NhsUJcj4PmZDYUxJOgFDSEkhg89UDmQ4AfEZpzdnbubcXdnM7MHh9XaGSs7LCwsKYkVJYUFhSaUlMTExMpYUFyns3u35AiiL9ndt//fe/PmvWf0Gl1lGtQbVmNkGA3fzsOnczMFLX9NbxrmPiw0DWsfXm8axX04mi96OHClg0MyGArqY7F68YQBSNA/pX/eBXmdNEKPOjQqAAsM6DIk+CURspgb0UqasvuxOR/rS99+ty334sOB63/9Uh4buDOudcUqckv7v8VHlCFj/t6U9YySFSKGuu/WBPeJ1SH1pBKt+53ihVnqCC55JbJKbvVw/CKxZ2hk2XXqRYM0SNioNv56be3TmYendM3UCtoCnLs5kb6e543Ts/wV9TyczxxbY30Tc9PlEqKBjHDgEBdhIfCqZGZp6QmyPRK4yKeBjxvsUqI43OMC2fVKhQhUw14FVTyOI3YuganbSmJnU0HgKnJJGNVYX/Iva9hVeRFpRHVBkMddpqf6wvQku5x4GXK4HwoiJeUBssPIOZ6KqqJXO2lFjUNVwQGVPBI8pA7re1R6jIhHfBJEqleXNFCdBhHrTfSKzZFQd1Y5Pg19HLJCIicDcbFwVQOCLuOILhPJuhNyUChtvXBEQh4NCBatqhnpGNaVv+tZ2vkELxOhIlrbQNxmxFGVFkuT0+XDO2ifmJHWXNQas+OxTIZ3LCaKHp8sbync/0+MpKjarKcVk646wyzfFgVead9WZprHZbLFIAkVD9aBvgH0TaBvAX0bFHaAtgticw+YP9TnF9jLNYEew9h8A/V30HwP9Y8wBuswtwFzmzC3Bce2YWztqOdt7uT3n3Dzxh8LG3RL'
+
+browser_user_agent = DEFAULT_BROWSER_USER_AGENT
+browser_name = DEFAULT_BROWSER_NAME
+browser_version = DEFAULT_BROWSER_VERSION
+browser_dfp = DEFAULT_BROWSER_DFP
 
 country_to_language = {'cz': 'cs', 'pl': 'pl', 'sk': 'sk'}
 known_countries = sorted(country_to_language.keys())
@@ -42,6 +48,14 @@ known_countries = sorted(country_to_language.keys())
 header_xhr = {'X-Requested-With': 'XMLHttpRequest'}
 header_accept_json = {'Accept': 'application/json, text/javascript, */*; q=0.01'}
 uuid_re = re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
+
+external_bank_source_map = {
+    '05855557-d3ee-46c9-98e1-375c10e1af12': 'Bank Millennium',
+    '8bd46568-f90e-445a-bec8-5fef7dc90569': 'Alior Bank',
+    'b5165570-f6f1-11e8-8eb2-f2801f1b9fd1': 'Bank Pekao SA',
+    '555dd77f-7424-4bf7-8869-5576e47793b9': 'Santander Bank Polska',
+    'a32d692c-397e-4307-9da8-8367fc3f9237': 'Santander Bank Polska',
+}
 
 
 def debug(msg):
@@ -174,6 +188,36 @@ def read_config(path):
 
 def cfg_get(name, default=None):
     return global_config.get(name, default)
+
+
+def apply_browser_identity():
+    global browser_user_agent, browser_name, browser_version, browser_dfp
+
+    browser_user_agent = pick(
+        os.environ.get('MBANK_CLI_USER_AGENT'),
+        cfg_get('browseruseragent'),
+        cfg_get('useragent'),
+        DEFAULT_BROWSER_USER_AGENT,
+    )
+    browser_name = pick(
+        os.environ.get('MBANK_CLI_BROWSER_NAME'),
+        cfg_get('browsername'),
+        DEFAULT_BROWSER_NAME,
+    )
+    browser_version = pick(
+        os.environ.get('MBANK_CLI_BROWSER_VERSION'),
+        cfg_get('browserversion'),
+        DEFAULT_BROWSER_VERSION,
+    )
+    browser_dfp = pick(
+        os.environ.get('MBANK_CLI_DFP'),
+        cfg_get('dfp'),
+        DEFAULT_BROWSER_DFP,
+    )
+
+    debug(f'browser.user_agent = {browser_user_agent}')
+    debug(f'browser.name = {browser_name}')
+    debug(f'browser.version = {browser_version}')
 
 
 def decode_http_content(raw, headers):
@@ -337,6 +381,7 @@ def initialize():
     root_url = f'https://{mbank_host}'
     base_url = f'https://{mbank_host}/{lang}'
 
+    apply_browser_identity()
     http_init(cookie_jar_path=cookie_jar_path, ca_path=ca_path)
 
 
@@ -370,6 +415,13 @@ def match_uuid(value, context):
     if not uuid_re.fullmatch(value):
         fail(f'{context}: invalid UUID: {value}', code=3)
     return value
+
+
+def normalize_external_source_name(value):
+    text = str(value or '').strip()
+    if not text:
+        return 'external'
+    return external_bank_source_map.get(text.lower(), text)
 
 
 def get_tabid():
@@ -498,7 +550,7 @@ def post_json(url, payload, headers=None, ignore_errors=()):
 
 def do_2fa(register_device=None):
     headers = {'Origin': root_url, 'Referer': f'{root_url}/connect/Login'}
-    dfp = cfg_get('dfp') or browser_dfp
+    dfp = browser_dfp
 
     sca_doc = post_json(f'{root_url}/signin/connect/api/sca', {'dfp': dfp}, headers=headers)
     unexpire_cookie('mBank8', 'login.sca.cookie')
@@ -840,7 +892,7 @@ def normalize_external_account(raw):
         'balance': balance_value,
         'available': available_value,
         'currency': str(currency or '').upper(),
-        'source': str(source),
+        'source': normalize_external_source_name(source),
     }
 
 
@@ -888,9 +940,14 @@ def fetch_offline_accounts(login_info):
     return out
 
 
+def current_timestamp_iso():
+    return datetime.now().astimezone().replace(microsecond=0).isoformat()
+
+
 def print_account_row(account):
+    ts = current_timestamp_iso()
     print(
-        f"{account['name']};{account['number']};"
+        f"{ts};{account['name']};{account['number']};"
         f"{format_money(account.get('balance'), account.get('currency'))};"
         f"{format_money(account.get('available'), account.get('currency'))};"
         f"{account.get('source', '')}"

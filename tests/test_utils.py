@@ -119,6 +119,49 @@ class TestUtils(unittest.TestCase):
         with mock.patch.object(self.m.locale, 'getlocale', side_effect=RuntimeError('boom')):
             self.assertIsNone(self.m.get_tz_country_guess())
 
+    def test_apply_browser_identity_defaults(self):
+        self.m.global_config = {}
+        with mock.patch.dict(self.m.os.environ, {}, clear=True):
+            self.m.apply_browser_identity()
+        self.assertEqual(self.m.browser_user_agent, self.m.DEFAULT_BROWSER_USER_AGENT)
+        self.assertEqual(self.m.browser_name, self.m.DEFAULT_BROWSER_NAME)
+        self.assertEqual(self.m.browser_version, self.m.DEFAULT_BROWSER_VERSION)
+        self.assertEqual(self.m.browser_dfp, self.m.DEFAULT_BROWSER_DFP)
+
+    def test_apply_browser_identity_from_config(self):
+        self.m.global_config = {
+            'browseruseragent': 'UA/1.0',
+            'browsername': 'Brave',
+            'browserversion': '1',
+            'dfp': 'DFP-XYZ',
+        }
+        with mock.patch.dict(self.m.os.environ, {}, clear=True):
+            self.m.apply_browser_identity()
+        self.assertEqual(self.m.browser_user_agent, 'UA/1.0')
+        self.assertEqual(self.m.browser_name, 'Brave')
+        self.assertEqual(self.m.browser_version, '1')
+        self.assertEqual(self.m.browser_dfp, 'DFP-XYZ')
+
+    def test_apply_browser_identity_env_overrides_config(self):
+        self.m.global_config = {
+            'browseruseragent': 'CFG-UA',
+            'browsername': 'CFG-NAME',
+            'browserversion': 'CFG-VER',
+            'dfp': 'CFG-DFP',
+        }
+        env = {
+            'MBANK_CLI_USER_AGENT': 'ENV-UA',
+            'MBANK_CLI_BROWSER_NAME': 'ENV-NAME',
+            'MBANK_CLI_BROWSER_VERSION': 'ENV-VER',
+            'MBANK_CLI_DFP': 'ENV-DFP',
+        }
+        with mock.patch.dict(self.m.os.environ, env, clear=True):
+            self.m.apply_browser_identity()
+        self.assertEqual(self.m.browser_user_agent, 'ENV-UA')
+        self.assertEqual(self.m.browser_name, 'ENV-NAME')
+        self.assertEqual(self.m.browser_version, 'ENV-VER')
+        self.assertEqual(self.m.browser_dfp, 'ENV-DFP')
+
 
 if __name__ == '__main__':
     unittest.main()

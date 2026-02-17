@@ -48,6 +48,44 @@ class TestAccounts(unittest.TestCase):
         self.assertIsNone(self.m.normalize_external_account({'name': 'A'}))
         self.assertIsNone(self.m.normalize_external_account({'accountNumber': '1'}))
 
+    def test_normalize_external_account_maps_known_bank_ids(self):
+        cases = [
+            ('05855557-d3ee-46c9-98e1-375c10e1af12', 'Bank Millennium'),
+            ('8bd46568-f90e-445a-bec8-5fef7dc90569', 'Alior Bank'),
+            ('b5165570-f6f1-11e8-8eb2-f2801f1b9fd1', 'Bank Pekao SA'),
+            ('555dd77f-7424-4bf7-8869-5576e47793b9', 'Santander Bank Polska'),
+            ('a32d692c-397e-4307-9da8-8367fc3f9237', 'Santander Bank Polska'),
+        ]
+        for bank_id, expected in cases:
+            raw = {
+                'name': 'Zewnetrzne',
+                'accountNumber': 'PL 11 11',
+                'balance': {'amount': '1', 'currency': 'PLN'},
+                'bankId': bank_id,
+            }
+            out = self.m.normalize_external_account(raw)
+            self.assertEqual(out['source'], expected)
+
+    def test_normalize_external_account_maps_bank_id_case_insensitive(self):
+        raw = {
+            'name': 'Zewnetrzne',
+            'accountNumber': 'PL 11 11',
+            'balance': {'amount': '1', 'currency': 'PLN'},
+            'bankId': '8BD46568-F90E-445A-BEC8-5FEF7DC90569',
+        }
+        out = self.m.normalize_external_account(raw)
+        self.assertEqual(out['source'], 'Alior Bank')
+
+    def test_normalize_external_account_unknown_bank_id_passthrough(self):
+        raw = {
+            'name': 'Zewnetrzne',
+            'accountNumber': 'PL 11 11',
+            'balance': {'amount': '1', 'currency': 'PLN'},
+            'bankId': 'unknown-id',
+        }
+        out = self.m.normalize_external_account(raw)
+        self.assertEqual(out['source'], 'unknown-id')
+
     def test_iter_dict_nodes(self):
         data = {'a': {'b': [{'c': 1}, {'d': 2}]}, 'e': [1, {'f': 3}]}
         nodes = list(self.m.iter_dict_nodes(data))
@@ -109,9 +147,11 @@ class TestAccounts(unittest.TestCase):
 
     def test_print_account_row_uses_semicolon_separator(self):
         account = {'name': 'A', 'number': '123', 'balance': '1', 'available': '1', 'currency': 'PLN', 'source': 'mbank'}
-        with mock.patch('sys.stdout', new_callable=io.StringIO) as out:
+        with mock.patch.object(self.m, 'current_timestamp_iso', return_value='2026-02-17T21:37:12+01:00'), mock.patch(
+            'sys.stdout', new_callable=io.StringIO
+        ) as out:
             self.m.print_account_row(account)
-        self.assertEqual(out.getvalue().strip(), 'A;123;1.00 PLN;1.00 PLN;mbank')
+        self.assertEqual(out.getvalue().strip(), '2026-02-17T21:37:12+01:00;A;123;1.00 PLN;1.00 PLN;mbank')
 
     def test_do_list_merges_main_and_external(self):
         main_payload = {

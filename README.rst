@@ -53,7 +53,15 @@ Przykładowe pola konfiguracji:
 - ``Country`` (``PL`` / ``CZ`` / ``SK``)
 - ``Login``
 - ``Password``
-- opcjonalnie: ``CAfile``, ``PasswordManager``, ``DFP``
+- opcjonalnie: ``CAfile``, ``PasswordManager``, ``DFP``,
+  ``BrowserUserAgent``, ``BrowserName``, ``BrowserVersion``
+
+Override przez zmienne środowiskowe (najwyższy priorytet):
+
+- ``MBANK_CLI_USER_AGENT``
+- ``MBANK_CLI_BROWSER_NAME``
+- ``MBANK_CLI_BROWSER_VERSION``
+- ``MBANK_CLI_DFP``
 
 Użycie
 ------
@@ -63,6 +71,12 @@ Lista kont:
 .. code-block:: bash
 
    python3 mbank-cli.py list
+
+Format wiersza ``list``:
+
+.. code-block:: text
+
+   2026-02-17T21:37:12+01:00;Nazwa konta;NumerKonta;Saldo;Dostepne;Zrodlo
 
 Wylogowanie:
 
