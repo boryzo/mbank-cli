@@ -765,6 +765,7 @@ def get_external_history_rows(login_info, start_date, end_date, with_id=False):
 
 
 def do_history(login_info, start_date=None, end_date=None, with_id=False, include_all=False):
+    result = []
     headers = {
         **header_xhr,
         'X-Tab-Id': login_info['headers'].get('X-Tab-Id', ''),
@@ -855,7 +856,7 @@ def do_history(login_info, start_date=None, end_date=None, with_id=False, includ
                 description = sanitize_field(tx.get('description', ''))
                 comment = sanitize_field(tx.get('comment', ''))
                 row = [tx_date, account_no, op_id, op_type, amount, balance, description, comment]
-                print(';'.join(row))
+                print(';'.join(row)); result.append(row)
             next_url = ops_data.get('nextPageUrl')
             if not next_url:
                 break
@@ -869,7 +870,8 @@ def do_history(login_info, start_date=None, end_date=None, with_id=False, includ
 
     if include_all:
         for row in get_external_history_rows(login_info, start_date, end_date, with_id=with_id):
-            print(row)
+            print(row); result.append(row)
+    return result
 
 
 def do_2fa(register_device=None):
