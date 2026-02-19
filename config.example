@@ -1,0 +1,29 @@
+# Example configuration for mbank-cli web API
+# Copy this file to ~/.config/mbank-cli/config and modify as needed
+
+# Required: mBank account credentials
+Country     PL
+Login       your_mbank_login
+Password    your_mbank_password
+
+# Required: Cookie jar path for session persistence
+CookieJar   ~/.local/share/mbank-cli/cookies.txt
+
+# Web API settings (for mbank_web.py)
+# API key for authentication (required for web API)
+ApiKey      your_secret_api_key_here
+
+# Allowed IPs for web API access (comma-separated, optional)
+# If not set or empty, all IPs are allowed
+# Examples:
+#   Single IP:      127.0.0.1
+#   Multiple IPs:   127.0.0.1, 192.168.1.100, 10.0.0.5
+Allowed_IPs 127.0.0.1, 192.168.1.100
+
+# Optional: Custom browser identity
+# BrowserUserAgent  Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128
+# BrowserName       Firefox
+# BrowserVersion    128
+
+# Optional: Custom CA certificate
+# CAfile    /path/to/ca-bundle.crt
