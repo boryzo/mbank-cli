@@ -8,6 +8,8 @@ Przykładowy plik:
 
 `~/Library/LaunchAgents/pl.mbank.http.wrapper.plist`
 
+Uwaga: zamień `/path/to/mbank-cli` na swoją lokalną ścieżkę repo.
+
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -21,7 +23,7 @@ Przykładowy plik:
       <string>/usr/bin/env</string>
       <string>bash</string>
       <string>-lc</string>
-      <string>cd /tmp/mountd/disk1_part1/myrepos/mbank-cli && set -a && source mbank_http_service.config && set +a && python3 mbank_http_wrapper.py</string>
+      <string>cd /path/to/mbank-cli && set -a && source mbank_http_service.config && set +a && python3 mbank_http_wrapper.py</string>
     </array>
 
     <key>RunAtLoad</key>
@@ -58,9 +60,9 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/tmp/mountd/disk1_part1/myrepos/mbank-cli
-EnvironmentFile=/tmp/mountd/disk1_part1/myrepos/mbank-cli/mbank_http_service.config
-ExecStart=/usr/bin/python3 /tmp/mountd/disk1_part1/myrepos/mbank-cli/mbank_http_wrapper.py
+WorkingDirectory=/path/to/mbank-cli
+EnvironmentFile=/path/to/mbank-cli/mbank_http_service.config
+ExecStart=/usr/bin/python3 /path/to/mbank-cli/mbank_http_wrapper.py
 Restart=always
 RestartSec=2
 User=YOUR_USER
@@ -89,14 +91,14 @@ Przykładowe wpisy (Europe/Warsaw, godzina 10:15 CET/CEST):
 
 ```cron
 CRON_TZ=Europe/Warsaw
-15 10 * * * cd /tmp/mountd/disk1_part1/myrepos/mbank-cli && python3 mbank-cli.py list >> balances_snapshot.txt 2>> balances_snapshot.err.log
+15 10 * * * cd /path/to/mbank-cli && python3 mbank-cli.py list >> balances_snapshot.txt 2>> balances_snapshot.err.log
 ```
 
 Historia raz w tygodniu (poniedziałek 10:20):
 
 ```cron
 CRON_TZ=Europe/Warsaw
-20 10 * * 1 cd /tmp/mountd/disk1_part1/myrepos/mbank-cli && python3 mbank-cli.py history --all >> history_weekly.txt 2>> history_weekly.err.log
+20 10 * * 1 cd /path/to/mbank-cli && python3 mbank-cli.py history --all >> history_weekly.txt 2>> history_weekly.err.log
 ```
 
 ## 4) Rekomendacje operacyjne
