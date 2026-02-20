@@ -1,0 +1,33 @@
+# Wrapper HTTP config (env-file format).
+# Usage:
+#   cp mbank_http_service.config.example mbank_http_service.config
+#   # edit values
+#   set -a
+#   source mbank_http_service.config
+#   set +a
+#   python3 mbank_http_wrapper.py
+
+MBANK_WRAPPER_HOST=127.0.0.1
+MBANK_WRAPPER_PORT=8787
+
+# REQUIRED
+MBANK_WRAPPER_API_KEY=change-me-to-a-long-random-secret
+
+# IP policy (CIDR/IP list, comma-separated)
+MBANK_WRAPPER_ALLOW_IPS=127.0.0.1/32
+MBANK_WRAPPER_DENY_IPS=
+
+# Trust X-Forwarded-For only behind trusted reverse proxy: 0 or 1
+MBANK_WRAPPER_TRUST_XFF=0
+
+# Backend command runtime timeout (seconds)
+MBANK_WRAPPER_TIMEOUT=180
+
+# Rate limit per source IP
+MBANK_WRAPPER_RATE_LIMIT_COUNT=2
+MBANK_WRAPPER_RATE_LIMIT_WINDOW_SEC=10
+
+# Optional explicit CLI wiring
+# MBANK_WRAPPER_SCRIPT=/Users/you/proj/mbank-cli/mbank-cli.py
+# MBANK_WRAPPER_PYTHON=/usr/bin/python3
+# MBANK_WRAPPER_CWD=/Users/you/proj/mbank-cli

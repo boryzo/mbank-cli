@@ -7,6 +7,17 @@ czytelności kodu i łatwego onboardingu junior developerów.
 To repozytorium jest portem oryginalnego projektu Jakuba Wilka:
 https://github.com/jwilk/mbank-cli
 
+Dokumentacja
+------------
+
+Pełna dokumentacja HTTP wrappera i bezpieczeństwa jest w repo:
+
+- ``docs/HTTP_API.md`` - endpointy, auth, statusy, przykłady ``curl``.
+- ``docs/SECURITY.md`` - hardening checklist i zalecenia produkcyjne.
+- ``docs/OPERATIONS.md`` - uruchamianie jako service (autostart) i cron.
+- ``mbank_http_service.config.example`` - przykładowy plik konfiguracyjny
+  dla wrappera (env-file).
+
 Status
 ------
 
@@ -115,6 +126,58 @@ Aktywacja profilu:
 
    python3 mbank-cli.py activate-profile personal
 
+Wrapper HTTP (Flask)
+--------------------
+
+Prosty wrapper HTTP uruchamiający dokładnie te same komendy CLI:
+
+- ``GET/POST /accounts`` -> ``python3 mbank-cli.py list``
+- ``GET/POST /history`` -> ``python3 mbank-cli.py history --all``
+
+Uruchomienie lokalne:
+
+.. code-block:: bash
+
+   pip install flask
+   export MBANK_WRAPPER_API_KEY='zmien-to-na-dlugi-losowy-klucz'
+   export MBANK_WRAPPER_ALLOW_IPS='127.0.0.1/32'
+   python3 mbank_http_wrapper.py
+
+Autoryzacja API key (jedna z metod):
+
+- nagłówek ``X-API-Key: ...``
+- query param ``?api_key=...``
+- POST body ``api_key=...`` (form lub JSON)
+
+Ważne zmienne środowiskowe wrappera:
+
+- ``MBANK_WRAPPER_API_KEY`` (wymagane)
+- ``MBANK_WRAPPER_ALLOW_IPS`` (lista CIDR/IP rozdzielona przecinkami)
+- ``MBANK_WRAPPER_DENY_IPS`` (blacklista CIDR/IP)
+- ``MBANK_WRAPPER_TRUST_XFF=1`` (ufanie ``X-Forwarded-For`` za reverse proxy)
+- ``MBANK_WRAPPER_TIMEOUT`` (timeout subprocess, sekundy)
+- ``MBANK_WRAPPER_RATE_LIMIT_COUNT`` (domyślnie ``2``)
+- ``MBANK_WRAPPER_RATE_LIMIT_WINDOW_SEC`` (domyślnie ``10``)
+- ``MBANK_WRAPPER_HOST`` / ``MBANK_WRAPPER_PORT``
+
+Zachowanie bezpieczeństwa:
+
+- bez poprawnego API key: ``401``,
+- niedozwolony IP: ``403``,
+- rate limit per IP (domyślnie max 2 requesty/10s): ``429``,
+- równoległe uruchomienie komendy: ``429``,
+- timeout backendu CLI: ``504``,
+- błąd CLI: ``502`` + body ze stderr (lub stdout fallback),
+- sukces: ``200`` + czysty output CLI ``text/plain``.
+
+Service i cron
+--------------
+
+Masz gotowe przykłady uruchamiania z autostartem systemu (``launchd``/``systemd``)
+oraz harmonogramu ``cron`` w:
+
+- ``docs/OPERATIONS.md``
+
 Debug
 -----
 
@@ -132,12 +195,20 @@ Projekt ma testy offline, bez logowania do prawdziwego mBanku:
 - integration (offline): lokalny fake server HTTP i pełny przepływ wybranych
   komend,
 - CLI black-box: testy ``subprocess`` na realnym wywołaniu skryptu.
+- wrapper HTTP (unit + mocki): auth API key, blokowanie IP (allow/deny/XFF),
+  stałe mapowanie endpoint->komenda, timeouty, lock współbieżności, kody HTTP.
 
 Uruchomienie pełnego zestawu:
 
 .. code-block:: bash
 
    python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+Uruchomienie tylko testów wrappera:
+
+.. code-block:: bash
+
+   python3 -m unittest tests/test_http_wrapper.py -v
 
 Licencja
 --------
