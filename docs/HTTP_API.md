@@ -11,10 +11,11 @@ Nie ma parametryzacji komend przez HTTP.
 
 ```bash
 pip install flask
-cp mbank_http_service.config.example mbank_http_service.config
+mkdir -p ~/.config/mbank-cli
+cp mbank_http_service.config.example ~/.config/mbank-cli/http-wrapper.env
 # uzupełnij MBANK_WRAPPER_API_KEY
 set -a
-source mbank_http_service.config
+source ~/.config/mbank-cli/http-wrapper.env
 set +a
 python3 mbank_http_wrapper.py
 ```

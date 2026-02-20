@@ -14,7 +14,7 @@ Pełna dokumentacja HTTP wrappera i bezpieczeństwa jest w repo:
 
 - ``docs/HTTP_API.md`` - endpointy, auth, statusy, przykłady ``curl``.
 - ``docs/SECURITY.md`` - hardening checklist i zalecenia produkcyjne.
-- ``docs/OPERATIONS.md`` - uruchamianie jako service (autostart) i cron.
+- ``docs/OPERATIONS.md`` - uruchamianie jako service (autostart).
 - ``mbank_http_service.config.example`` - przykładowy plik konfiguracyjny
   dla wrappera (env-file).
 
@@ -170,11 +170,10 @@ Zachowanie bezpieczeństwa:
 - błąd CLI: ``502`` + body ze stderr (lub stdout fallback),
 - sukces: ``200`` + czysty output CLI ``text/plain``.
 
-Service i cron
---------------
+Service
+-------
 
-Masz gotowe przykłady uruchamiania z autostartem systemu (``launchd``/``systemd``)
-oraz harmonogramu ``cron`` w:
+Masz gotowe przykłady uruchamiania z autostartem systemu (``launchd``/``systemd``) w:
 
 - ``docs/OPERATIONS.md``
 

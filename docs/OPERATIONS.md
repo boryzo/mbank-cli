@@ -1,4 +1,4 @@
-# Operations: service autostart i cron
+# Operations: service autostart
 
 Poniżej są praktyczne przykłady dla wrappera HTTP i cyklicznego eksportu danych.
 
@@ -8,7 +8,7 @@ Przykładowy plik:
 
 `~/Library/LaunchAgents/pl.mbank.http.wrapper.plist`
 
-Uwaga: zamień `/path/to/mbank-cli` na swoją lokalną ścieżkę repo.
+Uwaga: zamień `/srv/mbank-cli` na swoją lokalną ścieżkę repo.
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -23,7 +23,7 @@ Uwaga: zamień `/path/to/mbank-cli` na swoją lokalną ścieżkę repo.
       <string>/usr/bin/env</string>
       <string>bash</string>
       <string>-lc</string>
-      <string>cd /path/to/mbank-cli && set -a && source mbank_http_service.config && set +a && python3 mbank_http_wrapper.py</string>
+      <string>cd /srv/mbank-cli && set -a && source ~/.config/mbank-cli/http-wrapper.env && set +a && python3 mbank_http_wrapper.py</string>
     </array>
 
     <key>RunAtLoad</key>
@@ -56,20 +56,24 @@ Przykładowy unit:
 ```ini
 [Unit]
 Description=mBank HTTP Wrapper
-After=network.target
+Wants=network-online.target
+After=network-online.target local-fs.target
 
 [Service]
 Type=simple
-WorkingDirectory=/path/to/mbank-cli
-EnvironmentFile=/path/to/mbank-cli/mbank_http_service.config
-ExecStart=/usr/bin/python3 /path/to/mbank-cli/mbank_http_wrapper.py
+WorkingDirectory=/srv/mbank-cli
+EnvironmentFile=/etc/mbank-cli/http-wrapper.env
+ExecStartPre=/bin/sleep 60
+ExecStart=/usr/bin/python3 /srv/mbank-cli/mbank_http_wrapper.py
 Restart=always
 RestartSec=2
-User=YOUR_USER
+User=root
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+`ExecStartPre=/bin/sleep 60` daje czas na montowanie dysków i sieci po restarcie.
 
 Aktywacja:
 
@@ -79,31 +83,9 @@ sudo systemctl enable --now mbank-http-wrapper.service
 sudo systemctl status mbank-http-wrapper.service
 ```
 
-## 3) Cron: cykliczny export `list` i `history`
+## 3) Rekomendacje operacyjne
 
-Edytuj crontab:
-
-```bash
-crontab -e
-```
-
-Przykładowe wpisy (Europe/Warsaw, godzina 10:15 CET/CEST):
-
-```cron
-CRON_TZ=Europe/Warsaw
-15 10 * * * cd /path/to/mbank-cli && python3 mbank-cli.py list >> balances_snapshot.txt 2>> balances_snapshot.err.log
-```
-
-Historia raz w tygodniu (poniedziałek 10:20):
-
-```cron
-CRON_TZ=Europe/Warsaw
-20 10 * * 1 cd /path/to/mbank-cli && python3 mbank-cli.py history --all >> history_weekly.txt 2>> history_weekly.err.log
-```
-
-## 4) Rekomendacje operacyjne
-
-- trzymaj `mbank_http_service.config` poza gitem (plik jest w `.gitignore`),
-- ustaw prawa do configu: `chmod 600 mbank_http_service.config`,
+- trzymaj config poza gitem, np. `~/.config/mbank-cli/http-wrapper.env` albo `/etc/mbank-cli/http-wrapper.env`,
+- ustaw prawa do configu: `chmod 600 ~/.config/mbank-cli/http-wrapper.env` (lub `/etc/mbank-cli/http-wrapper.env`),
 - logi rotuj i czyść okresowo,
 - na produkcji wystawiaj wrapper za reverse proxy + TLS.
